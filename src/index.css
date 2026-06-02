@@ -1,0 +1,31 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #F8FAFC;
+  color: #1E293B;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid #CBD5E1;
+  background: #fff;
+  border-radius: 8px;
+  font-family: inherit;
+}
+
+input, textarea, select {
+  font-family: inherit;
+  outline: none;
+}
+
+input:focus {
+  border-color: #3B82F6 !important;
+  box-shadow: 0 0 0 3px rgba(59,130,246,0.12);
+}
+
+#root {
+  max-width: 600px;
+  margin: 0 auto;
+  padding: 0 1rem 3rem;
+}

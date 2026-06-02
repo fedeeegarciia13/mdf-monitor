@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
+const SUPABASE_URL = "https://ykygszjqqnkgqjowbanj.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlreWdzempxcW5rZ3Fqb3diYW5qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MTExMDMsImV4cCI6MjA5NTk4NzEwM30.K24YPH1WeN7eUGpG2OJqfxYCYfNFm5DOxwWiictT_3Y";
+
 const MONITOR_KEY  = "mdf_monitor_v7";
 const CATALOG_KEY  = "mdf_catalog_v1";
 const PIN = "1234";
@@ -21,16 +24,30 @@ const TABS = [
   { key: "catalogo", label: "📦  Catálogo" },
 ];
 
-// ── Storage helpers usando localStorage ────────────────────────────────────
-function lsGet(key) {
-  try {
-    const val = localStorage.getItem(key);
-    return val ? JSON.parse(val) : null;
-  } catch { return null; }
+// ── Supabase helpers ────────────────────────────────────────────────────────
+async function sbGet(key) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/mdf_pedidos?key=eq.${key}&select=value`, {
+    headers: {
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+    }
+  });
+  const data = await res.json();
+  if (data && data.length > 0) return JSON.parse(data[0].value);
+  return null;
 }
-function lsSet(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); return true; }
-  catch { return false; }
+
+async function sbSet(key, value) {
+  await fetch(`${SUPABASE_URL}/rest/v1/mdf_pedidos`, {
+    method: "POST",
+    headers: {
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Content-Type": "application/json",
+      "Prefer": "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ key, value: JSON.stringify(value), updated_at: new Date().toISOString() })
+  });
 }
 
 function Dot({ color, size = 9 }) {
@@ -46,7 +63,6 @@ export default function App() {
   const [confirmPin, setConfirmPin] = useState(false);
   const [pinInput, setPinInput]     = useState("");
 
-  // Carga rápida
   const [cliente, setCliente]       = useState("");
   const [codeInput, setCodeInput]   = useState("");
   const [suggestions, setSuggestions] = useState([]);
@@ -55,7 +71,6 @@ export default function App() {
   const [cart, setCart]             = useState([]);
   const codeRef                     = useRef();
 
-  // Catálogo – formulario
   const [showEntryForm, setShowEntryForm] = useState(false);
   const [editId, setEditId]               = useState(null);
   const [entryForm, setEntryForm]         = useState(EMPTY_ENTRY);
@@ -64,35 +79,40 @@ export default function App() {
   const showToast = (msg, type = "ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2800); };
 
   // ── Storage ───────────────────────────────────────────────────────────────
-  const loadOrders = useCallback(() => {
-    const data = lsGet(MONITOR_KEY);
-    setOrders(data || EMPTY_ORDERS);
+  const loadOrders = useCallback(async () => {
+    try {
+      const data = await sbGet(MONITOR_KEY);
+      setOrders(data || EMPTY_ORDERS);
+    } catch { setOrders(o => o || EMPTY_ORDERS); }
   }, []);
 
-  const loadCatalog = useCallback(() => {
-    const data = lsGet(CATALOG_KEY);
-    setCatalog(data || EMPTY_CATALOG);
+  const loadCatalog = useCallback(async () => {
+    try {
+      const data = await sbGet(CATALOG_KEY);
+      setCatalog(data || EMPTY_CATALOG);
+    } catch { setCatalog(c => c || EMPTY_CATALOG); }
   }, []);
 
-  const saveOrders = useCallback((next) => {
+  const saveOrders = useCallback(async (next) => {
     setOrders(next);
-    if (!lsSet(MONITOR_KEY, next)) showToast("Error al guardar pedidos", "err");
+    try { await sbSet(MONITOR_KEY, next); }
+    catch { showToast("Error al guardar pedidos", "err"); }
   }, []);
 
-  const saveCatalog = useCallback((next) => {
+  const saveCatalog = useCallback(async (next) => {
     setCatalog(next);
-    if (!lsSet(CATALOG_KEY, next)) showToast("Error al guardar catálogo", "err");
+    try { await sbSet(CATALOG_KEY, next); }
+    catch { showToast("Error al guardar catálogo", "err"); }
   }, []);
 
   useEffect(() => {
     loadOrders();
     loadCatalog();
-    // Polling para que si se abre en otra pestaña/dispositivo se sincronice
     const id = setInterval(loadOrders, 5000);
     return () => clearInterval(id);
   }, [loadOrders, loadCatalog]);
 
-  // ── Autocompletado de código ──────────────────────────────────────────────
+  // ── Autocompletado ────────────────────────────────────────────────────────
   const handleCodeChange = (val) => {
     setCodeInput(val);
     setSelectedItem(null);
@@ -113,15 +133,10 @@ export default function App() {
   };
 
   const addToCart = () => {
-    if (!selectedItem) {
-      showToast("Seleccioná un artículo del catálogo", "err"); return;
-    }
+    if (!selectedItem) { showToast("Seleccioná un artículo del catálogo", "err"); return; }
     const qty = Math.max(1, parseInt(cantidad) || 1);
     setCart(prev => [...prev, { ...selectedItem, cantidad: String(qty), cartId: Date.now() }]);
-    setCodeInput("");
-    setSelectedItem(null);
-    setCantidad("1");
-    setSuggestions([]);
+    setCodeInput(""); setSelectedItem(null); setCantidad("1"); setSuggestions([]);
     codeRef.current?.focus();
   };
 
@@ -208,7 +223,6 @@ export default function App() {
   return (
     <div style={{ fontFamily: "system-ui", padding: "0.875rem 0" }}>
 
-      {/* Toast */}
       {toast && (
         <div style={{
           position: "sticky", top: 0, zIndex: 20, marginBottom: 12,
@@ -218,7 +232,6 @@ export default function App() {
         }}>{toast.msg}</div>
       )}
 
-      {/* PIN */}
       {confirmPin && (
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{ background: "#fff", borderRadius: 16, padding: "1.5rem", width: 260, boxShadow: "0 8px 32px rgba(0,0,0,0.18)" }}>
@@ -235,7 +248,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
         <div>
           <div style={{ fontSize: 17, fontWeight: 600 }}>📋 Monitor de producción</div>
@@ -250,7 +262,6 @@ export default function App() {
         )}
       </div>
 
-      {/* Contadores */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: "1.25rem" }}>
         {STAGES.map(s => (
           <div key={s.key} style={{ background: s.bg, border: `1.5px solid ${s.border}`, borderRadius: 12, padding: "0.75rem", textAlign: "center" }}>
@@ -260,11 +271,8 @@ export default function App() {
         ))}
       </div>
 
-      {/* ══ GESTIÓN ══════════════════════════════════════════════════════════════ */}
       {mode === "gestion" && (
         <div style={{ marginBottom: "1.5rem" }}>
-
-          {/* Sub-tabs */}
           <div style={{ display: "flex", gap: 0, marginBottom: "1rem", background: "#F1F5F9", borderRadius: 10, padding: 3 }}>
             {TABS.map(t => (
               <button key={t.key} onClick={() => setGTab(t.key)} style={{
@@ -277,47 +285,31 @@ export default function App() {
             ))}
           </div>
 
-          {/* ── CARGAR PEDIDO ── */}
           {gTab === "cargar" && (
             <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 14, padding: "1rem" }}>
-
-              {/* Cliente */}
               <div style={{ marginBottom: 12 }}>
                 <label style={lbl}>Cliente</label>
                 <input placeholder="Nombre del cliente (opcional)" value={cliente}
                   onChange={e => setCliente(e.target.value)} style={inp} />
               </div>
-
-              {/* Buscador de código */}
               <div style={{ marginBottom: 12 }}>
                 <label style={lbl}>Código de artículo</label>
                 <div style={{ position: "relative" }}>
-                  <input
-                    ref={codeRef}
-                    placeholder="Escribí el código o el nombre..."
-                    value={codeInput}
-                    onChange={e => handleCodeChange(e.target.value)}
+                  <input ref={codeRef} placeholder="Escribí el código o el nombre..."
+                    value={codeInput} onChange={e => handleCodeChange(e.target.value)}
                     onKeyDown={e => { if (e.key === "Enter" && suggestions.length === 1) selectSuggestion(suggestions[0]); }}
-                    style={{ ...inp, paddingRight: 36 }}
-                    autoComplete="off"
-                  />
+                    style={{ ...inp, paddingRight: 36 }} autoComplete="off" />
                   {codeInput && (
                     <button onClick={() => { setCodeInput(""); setSelectedItem(null); setSuggestions([]); codeRef.current?.focus(); }}
-                      style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", fontSize: 16, color: "#94A3B8", cursor: "pointer", padding: 0 }}>
-                      ✕
-                    </button>
+                      style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", fontSize: 16, color: "#94A3B8", cursor: "pointer", padding: 0 }}>✕</button>
                   )}
-
-                  {/* Dropdown sugerencias */}
                   {suggestions.length > 0 && (
                     <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: "1.5px solid #CBD5E1", borderRadius: 10, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", zIndex: 30, overflow: "hidden" }}>
                       {suggestions.map(item => (
-                        <div key={item.id}
-                          onClick={() => selectSuggestion(item)}
-                          style={{ padding: "10px 14px", cursor: "pointer", borderBottom: "1px solid #F1F5F9", transition: "background 0.1s" }}
+                        <div key={item.id} onClick={() => selectSuggestion(item)}
+                          style={{ padding: "10px 14px", cursor: "pointer", borderBottom: "1px solid #F1F5F9" }}
                           onMouseEnter={e => e.currentTarget.style.background = "#F8FAFC"}
-                          onMouseLeave={e => e.currentTarget.style.background = "#fff"}
-                        >
+                          onMouseLeave={e => e.currentTarget.style.background = "#fff"}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                             <span style={{ fontFamily: "monospace", fontSize: 12, color: "#94A3B8", flexShrink: 0 }}>{item.codigo}</span>
                             <span style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{item.nombre || item.material}</span>
@@ -331,8 +323,6 @@ export default function App() {
                       ))}
                     </div>
                   )}
-
-                  {/* Sin resultados */}
                   {codeInput.length > 1 && suggestions.length === 0 && !selectedItem && (
                     <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: "1.5px solid #FEE2E2", borderRadius: 10, padding: "10px 14px", zIndex: 30 }}>
                       <span style={{ fontSize: 13, color: "#EF4444" }}>Código no encontrado en el catálogo</span>
@@ -345,7 +335,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Artículo seleccionado + cantidad */}
               {selectedItem && (
                 <div style={{ background: "#EFF6FF", border: "1.5px solid #BFDBFE", borderRadius: 10, padding: "10px 14px", marginBottom: 12 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
@@ -365,14 +354,12 @@ export default function App() {
                         style={{ ...inp, width: 64, textAlign: "center", padding: "6px 8px" }} />
                     </div>
                   </div>
-                  <button onClick={addToCart}
-                    style={{ marginTop: 10, width: "100%", background: "#1D4ED8", color: "#fff", border: "none", fontSize: 13, fontWeight: 600, padding: "8px", borderRadius: 8, cursor: "pointer" }}>
+                  <button onClick={addToCart} style={{ marginTop: 10, width: "100%", background: "#1D4ED8", color: "#fff", border: "none", fontSize: 13, fontWeight: 600, padding: "8px", borderRadius: 8, cursor: "pointer" }}>
                     + Agregar a la lista
                   </button>
                 </div>
               )}
 
-              {/* Carrito / lista acumulada */}
               {cart.length > 0 && (
                 <div style={{ marginBottom: 12 }}>
                   <label style={{ ...lbl, marginBottom: 8 }}>Lista del pedido ({cart.length} artículo{cart.length !== 1 ? "s" : ""})</label>
@@ -390,8 +377,7 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-                  <button onClick={confirmCart}
-                    style={{ width: "100%", background: "#22C55E", color: "#fff", border: "none", fontSize: 14, fontWeight: 700, padding: "11px", borderRadius: 10, cursor: "pointer" }}>
+                  <button onClick={confirmCart} style={{ width: "100%", background: "#22C55E", color: "#fff", border: "none", fontSize: 14, fontWeight: 700, padding: "11px", borderRadius: 10, cursor: "pointer" }}>
                     ✓ Confirmar y cargar pedido
                   </button>
                 </div>
@@ -405,7 +391,6 @@ export default function App() {
             </div>
           )}
 
-          {/* ── CATÁLOGO ── */}
           {gTab === "catalogo" && (
             <div>
               <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
@@ -503,7 +488,6 @@ export default function App() {
         </div>
       )}
 
-      {/* ══ 4 ETAPAS ══════════════════════════════════════════════════════════════ */}
       {STAGES.map(stage => {
         const items = byStage(stage.key);
         return (

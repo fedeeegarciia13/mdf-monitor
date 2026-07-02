@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 const SUPABASE_URL = "https://ykygszjqqnkgqjowbanj.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlreWdzempxcW5rZ3Fqb3diYW5qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MTExMDMsImV4cCI6MjA5NTk4NzEwM30.K24YPH1WeN7eUGpG2OJqfxYCYfNFm5DOxwWiictT_3Y";
 
-const MONITOR_KEY  = "mdf_monitor_v7";
-const CATALOG_KEY  = "mdf_catalog_v1";
+const ORDERS_KEY  = "mdf_orders_v8";
+const HISTORY_KEY = "mdf_history_v1";
 const PIN = "1234";
+const ARCHIVE_AFTER_MIN = 60;
 
 const STAGES = [
   { key: "activo",     label: "Pedidos activos", dot: "#64748B", bg: "#F1F5F9", fg: "#1E293B", border: "#CBD5E1" },
@@ -13,24 +14,16 @@ const STAGES = [
   { key: "canteo",     label: "Canteo",          dot: "#F59E0B", bg: "#FEF3C7", fg: "#78350F", border: "#F59E0B" },
   { key: "completado", label: "Completados",     dot: "#22C55E", bg: "#DCFCE7", fg: "#14532D", border: "#22C55E" },
 ];
+const SEQ = ["activo", "corte", "canteo", "completado"];
 const NEXT_LABEL = { activo: "Enviar a Corte", corte: "Enviar a Canteo", canteo: "Marcar Completo" };
 const NEXT_COLOR = { activo: "#EF4444", corte: "#F59E0B", canteo: "#22C55E" };
 
 const EMPTY_ORDERS  = { orders: [], nextId: 1 };
-const EMPTY_CATALOG = { items: [], nextCId: 1 };
-const EMPTY_ENTRY   = { codigo: "", nombre: "", material: "", espesor: "", color: "", notas: "" };
-const TABS = [
-  { key: "cargar",   label: "➕  Cargar pedido" },
-  { key: "catalogo", label: "📦  Catálogo" },
-];
+const EMPTY_HISTORY = { items: [] };
 
-// ── Supabase helpers ────────────────────────────────────────────────────────
 async function sbGet(key) {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/mdf_pedidos?key=eq.${key}&select=value`, {
-    headers: {
-      "apikey": SUPABASE_KEY,
-      "Authorization": `Bearer ${SUPABASE_KEY}`,
-    }
+    headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` }
   });
   const data = await res.json();
   if (data && data.length > 0) return JSON.parse(data[0].value);
@@ -54,151 +47,145 @@ function Dot({ color, size = 9 }) {
   return <span style={{ display:"inline-block", width:size, height:size, borderRadius:"50%", background:color, flexShrink:0 }} />;
 }
 
+function fmt(ms) {
+  if (!ms || ms < 0) return "—";
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), rm = m % 60;
+  return rm > 0 ? `${h}h ${rm}min` : `${h}h`;
+}
+
+function timeAgo(ts) {
+  if (!ts) return "";
+  const m = Math.floor((Date.now() - ts) / 60000);
+  if (m < 1) return "recién";
+  if (m < 60) return `hace ${m} min`;
+  const h = Math.floor(m / 60);
+  return `hace ${h}h`;
+}
+
+function isToday(ts) {
+  if (!ts) return false;
+  const d = new Date(ts), n = new Date();
+  return d.getDate() === n.getDate() && d.getMonth() === n.getMonth() && d.getFullYear() === n.getFullYear();
+}
+
 export default function App() {
-  const [orders, setOrders]         = useState(null);
-  const [catalog, setCatalog]       = useState(null);
+  const [data, setData]             = useState(null);
+  const [history, setHistory]       = useState(null);
   const [mode, setMode]             = useState("operario");
-  const [gTab, setGTab]             = useState("cargar");
+  const [view, setView]             = useState("monitor");
   const [toast, setToast]           = useState(null);
   const [confirmPin, setConfirmPin] = useState(false);
   const [pinInput, setPinInput]     = useState("");
-
-  const [cliente, setCliente]       = useState("");
-  const [codeInput, setCodeInput]   = useState("");
-  const [suggestions, setSuggestions] = useState([]);
-  const [selectedItem, setSelectedItem] = useState(null);
-  const [cantidad, setCantidad]     = useState("1");
-  const [cart, setCart]             = useState([]);
-  const codeRef                     = useRef();
-
-  const [showEntryForm, setShowEntryForm] = useState(false);
-  const [editId, setEditId]               = useState(null);
-  const [entryForm, setEntryForm]         = useState(EMPTY_ENTRY);
-  const [catalogSearch, setCatalogSearch] = useState("");
+  const [showForm, setShowForm]     = useState(false);
+  const [form, setForm]             = useState({ cliente: "", observaciones: "" });
+  const [now, setNow]               = useState(Date.now());
 
   const showToast = (msg, type = "ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2800); };
 
-  // ── Storage ───────────────────────────────────────────────────────────────
-  const loadOrders = useCallback(async () => {
-    try {
-      const data = await sbGet(MONITOR_KEY);
-      setOrders(data || EMPTY_ORDERS);
-    } catch { setOrders(o => o || EMPTY_ORDERS); }
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(id);
   }, []);
 
-  const loadCatalog = useCallback(async () => {
-    try {
-      const data = await sbGet(CATALOG_KEY);
-      setCatalog(data || EMPTY_CATALOG);
-    } catch { setCatalog(c => c || EMPTY_CATALOG); }
+  const loadData = useCallback(async () => {
+    try { const r = await sbGet(ORDERS_KEY); setData(r || EMPTY_ORDERS); }
+    catch { setData(d => d || EMPTY_ORDERS); }
   }, []);
 
-  const saveOrders = useCallback(async (next) => {
-    setOrders(next);
-    try { await sbSet(MONITOR_KEY, next); }
-    catch { showToast("Error al guardar pedidos", "err"); }
+  const loadHistory = useCallback(async () => {
+    try { const r = await sbGet(HISTORY_KEY); setHistory(r || EMPTY_HISTORY); }
+    catch { setHistory(h => h || EMPTY_HISTORY); }
   }, []);
 
-  const saveCatalog = useCallback(async (next) => {
-    setCatalog(next);
-    try { await sbSet(CATALOG_KEY, next); }
-    catch { showToast("Error al guardar catálogo", "err"); }
+  const saveData = useCallback(async (next) => {
+    setData(next);
+    try { await sbSet(ORDERS_KEY, next); }
+    catch (e) { showToast("Error al guardar: " + (e?.message || ""), "err"); }
+  }, []);
+
+  const saveHistory = useCallback(async (next) => {
+    setHistory(next);
+    try { await sbSet(HISTORY_KEY, next); }
+    catch { showToast("Error al guardar historial", "err"); }
   }, []);
 
   useEffect(() => {
-    loadOrders();
-    loadCatalog();
-    const id = setInterval(loadOrders, 5000);
+    loadData(); loadHistory();
+    const id = setInterval(() => { loadData(); loadHistory(); }, 5000);
     return () => clearInterval(id);
-  }, [loadOrders, loadCatalog]);
+  }, [loadData, loadHistory]);
 
-  // ── Autocompletado ────────────────────────────────────────────────────────
-  const handleCodeChange = (val) => {
-    setCodeInput(val);
-    setSelectedItem(null);
-    if (!val.trim() || !catalog) { setSuggestions([]); return; }
-    const q = val.trim().toLowerCase();
-    const matches = catalog.items.filter(c =>
-      c.codigo.toLowerCase().includes(q) || c.nombre.toLowerCase().includes(q)
-    ).slice(0, 6);
-    setSuggestions(matches);
+  useEffect(() => {
+    if (!data || !history) return;
+    const cutoff = Date.now() - ARCHIVE_AFTER_MIN * 60 * 1000;
+    const toArchive = data.orders.filter(o => o.stage === "completado" && o.timestamps?.completado && o.timestamps.completado < cutoff);
+    if (toArchive.length === 0) return;
+    const remaining = data.orders.filter(o => !toArchive.find(a => a.id === o.id));
+    saveData({ ...data, orders: remaining });
+    saveHistory({ items: [...toArchive, ...history.items] });
+  }, [now, data, history]);
+
+  const addOrder = () => {
+    if (!form.cliente.trim()) { showToast("Ingresá el nombre del cliente", "err"); return; }
+    const ts = Date.now();
+    const order = {
+      id: data.nextId,
+      numero: `PED-${String(data.nextId).padStart(4, "0")}`,
+      cliente: form.cliente.trim(),
+      observaciones: form.observaciones.trim(),
+      stage: "activo",
+      hora: new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" }),
+      timestamps: { activo: ts },
+    };
+    saveData({ orders: [...data.orders, order], nextId: data.nextId + 1 });
+    setForm({ cliente: "", observaciones: "" });
+    setShowForm(false);
+    showToast(`${order.numero} cargado`);
   };
 
-  const selectSuggestion = (item) => {
-    setCodeInput(item.codigo);
-    setSelectedItem(item);
-    setSuggestions([]);
-    setCantidad("1");
-    setTimeout(() => document.getElementById("cant-input")?.focus(), 50);
-  };
-
-  const addToCart = () => {
-    if (!selectedItem) { showToast("Seleccioná un artículo del catálogo", "err"); return; }
-    const qty = Math.max(1, parseInt(cantidad) || 1);
-    setCart(prev => [...prev, { ...selectedItem, cantidad: String(qty), cartId: Date.now() }]);
-    setCodeInput(""); setSelectedItem(null); setCantidad("1"); setSuggestions([]);
-    codeRef.current?.focus();
-  };
-
-  const removeFromCart = (cartId) => setCart(prev => prev.filter(i => i.cartId !== cartId));
-
-  const confirmCart = () => {
-    if (cart.length === 0) { showToast("Agregá al menos un artículo", "err"); return; }
-    let id = orders.nextId;
-    const hora = new Date().toLocaleTimeString("es-AR", { hour:"2-digit", minute:"2-digit" });
-    const newOrders = cart.map(p => ({
-      id: id++,
-      numero: `PED-${String(id - 1).padStart(4, "0")}`,
-      cliente:  cliente.trim() || "Sin cliente",
-      articulo: p.codigo,
-      nombre:   p.nombre,
-      material: p.material,
-      espesor:  p.espesor,
-      color:    p.color,
-      cantidad: p.cantidad,
-      notas:    p.notas || "",
-      stage: "activo", hora,
-    }));
-    saveOrders({ orders: [...orders.orders, ...newOrders], nextId: id });
-    setCart([]); setCliente(""); setCodeInput(""); setSelectedItem(null); setCantidad("1");
-    showToast(`${newOrders.length} artículo${newOrders.length !== 1 ? "s" : ""} cargado${newOrders.length !== 1 ? "s" : ""}`);
-  };
-
-  // ── Pedidos ───────────────────────────────────────────────────────────────
   const advance = (id) => {
-    const seq = ["activo", "corte", "canteo", "completado"];
-    saveOrders({ ...orders, orders: orders.orders.map(o => {
+    const ts = Date.now();
+    saveData({ ...data, orders: data.orders.map(o => {
       if (o.id !== id) return o;
-      const i = seq.indexOf(o.stage);
-      return i < seq.length - 1 ? { ...o, stage: seq[i + 1] } : o;
+      const i = SEQ.indexOf(o.stage);
+      if (i >= SEQ.length - 1) return o;
+      const nextStage = SEQ[i + 1];
+      return { ...o, stage: nextStage, timestamps: { ...o.timestamps, [nextStage]: ts } };
     })});
   };
-  const goBack = (id) => {
-    const seq = ["activo", "corte", "canteo", "completado"];
-    saveOrders({ ...orders, orders: orders.orders.map(o => {
-      if (o.id !== id) return o;
-      const i = seq.indexOf(o.stage);
-      return i > 0 ? { ...o, stage: seq[i - 1] } : o;
-    })});
-  };
-  const deleteOrder = (id) => { saveOrders({ ...orders, orders: orders.orders.filter(o => o.id !== id) }); showToast("Eliminado"); };
 
-  // ── Catálogo ──────────────────────────────────────────────────────────────
-  const saveEntry = () => {
-    if (!entryForm.codigo.trim() || !entryForm.material.trim()) { showToast("Código y material son obligatorios", "err"); return; }
-    const items = catalog.items;
-    if (editId !== null) {
-      saveCatalog({ ...catalog, items: items.map(i => i.id === editId ? { ...i, ...entryForm } : i) });
-      showToast("Artículo actualizado");
-    } else {
-      if (items.find(i => i.codigo.toLowerCase() === entryForm.codigo.toLowerCase())) { showToast("Ese código ya existe", "err"); return; }
-      saveCatalog({ items: [...items, { id: catalog.nextCId, ...entryForm }], nextCId: catalog.nextCId + 1 });
-      showToast("Artículo agregado");
-    }
-    setEntryForm(EMPTY_ENTRY); setShowEntryForm(false); setEditId(null);
+  const goBack = (id) => {
+    saveData({ ...data, orders: data.orders.map(o => {
+      if (o.id !== id) return o;
+      const i = SEQ.indexOf(o.stage);
+      if (i <= 0) return o;
+      const prev = SEQ[i - 1];
+      const ts = { ...o.timestamps };
+      delete ts[o.stage];
+      return { ...o, stage: prev, timestamps: ts };
+    })});
   };
-  const editEntry = (item) => { setEntryForm({ codigo: item.codigo, nombre: item.nombre, material: item.material, espesor: item.espesor, color: item.color, notas: item.notas || "" }); setEditId(item.id); setShowEntryForm(true); };
-  const deleteEntry = (id) => { saveCatalog({ ...catalog, items: catalog.items.filter(i => i.id !== id) }); showToast("Artículo eliminado"); };
+
+  const deleteOrder = (id) => {
+    saveData({ ...data, orders: data.orders.filter(o => o.id !== id) });
+    showToast("Pedido eliminado");
+  };
+
+  const archiveNow = (id) => {
+    const order = data.orders.find(o => o.id === id);
+    if (!order) return;
+    saveData({ ...data, orders: data.orders.filter(o => o.id !== id) });
+    saveHistory({ items: [order, ...history.items] });
+    showToast("Movido al historial");
+  };
+
+  const clearHistory = () => {
+    if (!window.confirm("¿Borrar todo el historial?")) return;
+    saveHistory(EMPTY_HISTORY);
+    showToast("Historial borrado");
+  };
 
   const tryGestion = () => { setConfirmPin(true); setPinInput(""); };
   const checkPin = () => {
@@ -206,30 +193,33 @@ export default function App() {
     else { showToast("PIN incorrecto", "err"); setPinInput(""); }
   };
 
-  if (!orders || !catalog) return (
+  const todayOrders = [...(data?.orders || []), ...(history?.items || [])].filter(o => isToday(o.timestamps?.activo));
+  const completedToday = todayOrders.filter(o => o.stage === "completado");
+
+  function avgTime(orders, from, to) {
+    const times = orders.map(o => o.timestamps?.[to] && o.timestamps?.[from] ? o.timestamps[to] - o.timestamps[from] : null).filter(Boolean);
+    if (!times.length) return null;
+    return times.reduce((a, b) => a + b, 0) / times.length;
+  }
+
+  const avgCorte  = avgTime(completedToday, "corte", "canteo");
+  const avgCanteo = avgTime(completedToday, "canteo", "completado");
+  const avgTotal  = avgTime(completedToday, "activo", "completado");
+
+  if (!data || !history) return (
     <div style={{ padding: "3rem", textAlign: "center", color: "#94A3B8", fontSize: 14 }}>⏳ Cargando...</div>
   );
 
-  const byStage = key => orders.orders.filter(o => o.stage === key);
-  const filteredCatalog = catalog.items.filter(i =>
-    i.codigo.toLowerCase().includes(catalogSearch.toLowerCase()) ||
-    i.nombre.toLowerCase().includes(catalogSearch.toLowerCase()) ||
-    i.material.toLowerCase().includes(catalogSearch.toLowerCase())
-  );
-
+  const byStage = key => data.orders.filter(o => o.stage === key);
+  const historyToday = history.items.filter(o => isToday(o.timestamps?.activo));
+  const historyOld   = history.items.filter(o => !isToday(o.timestamps?.activo));
   const inp = { fontSize: 13, padding: "8px 10px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#fff", width: "100%", boxSizing: "border-box" };
-  const lbl = { fontSize: 11, fontWeight: 600, color: "#64748B", marginBottom: 3, display: "block", textTransform: "uppercase", letterSpacing: "0.04em" };
 
   return (
-    <div style={{ fontFamily: "system-ui", padding: "0.875rem 0" }}>
+    <div style={{ fontFamily: "system-ui", padding: "0.875rem 0", maxWidth: 860, margin: "0 auto" }}>
 
       {toast && (
-        <div style={{
-          position: "sticky", top: 0, zIndex: 20, marginBottom: 12,
-          background: toast.type === "err" ? "#FEE2E2" : toast.type === "warn" ? "#FEF3C7" : "#DCFCE7",
-          color: toast.type === "err" ? "#7F1D1D" : toast.type === "warn" ? "#78350F" : "#14532D",
-          padding: "0.5rem 1rem", borderRadius: 10, fontSize: 13, fontWeight: 500,
-        }}>{toast.msg}</div>
+        <div style={{ position: "sticky", top: 0, zIndex: 20, marginBottom: 12, background: toast.type === "err" ? "#FEE2E2" : "#DCFCE7", color: toast.type === "err" ? "#7F1D1D" : "#14532D", padding: "0.5rem 1rem", borderRadius: 10, fontSize: 13, fontWeight: 500 }}>{toast.msg}</div>
       )}
 
       {confirmPin && (
@@ -237,310 +227,249 @@ export default function App() {
           <div style={{ background: "#fff", borderRadius: 16, padding: "1.5rem", width: 260, boxShadow: "0 8px 32px rgba(0,0,0,0.18)" }}>
             <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Acceso a Gestión</div>
             <div style={{ fontSize: 13, color: "#64748B", marginBottom: 16 }}>Ingresá el PIN para continuar</div>
-            <input type="password" placeholder="PIN" value={pinInput}
-              onChange={e => setPinInput(e.target.value)} onKeyDown={e => e.key === "Enter" && checkPin()}
-              style={{ ...inp, fontSize: 20, textAlign: "center", letterSpacing: 8, marginBottom: 12 }} autoFocus />
+            <input type="password" placeholder="PIN" value={pinInput} onChange={e => setPinInput(e.target.value)} onKeyDown={e => e.key === "Enter" && checkPin()} style={{ ...inp, fontSize: 20, textAlign: "center", letterSpacing: 8, marginBottom: 12 }} autoFocus />
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={checkPin} style={{ flex: 1, background: "#1E293B", color: "#fff", border: "none", fontSize: 14, padding: "8px", borderRadius: 8 }}>Entrar</button>
-              <button onClick={() => setConfirmPin(false)} style={{ fontSize: 14, padding: "8px 14px" }}>Cancelar</button>
+              <button onClick={checkPin} style={{ flex: 1, background: "#1E293B", color: "#fff", border: "none", fontSize: 14, padding: "8px", borderRadius: 8, cursor: "pointer" }}>Entrar</button>
+              <button onClick={() => setConfirmPin(false)} style={{ fontSize: 14, padding: "8px 14px", cursor: "pointer" }}>Cancelar</button>
             </div>
           </div>
         </div>
       )}
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.25rem" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
         <div>
-          <div style={{ fontSize: 17, fontWeight: 600 }}>📋 Monitor de producción</div>
-          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>Actualización en tiempo real · cada 5 seg</div>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>📋 Monitor de producción</div>
+          <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 2 }}>Tiempo real · se actualiza cada 5 seg</div>
         </div>
-        {mode === "operario" ? (
-          <button onClick={tryGestion} style={{ fontSize: 12, padding: "5px 12px" }}>⚙ Gestión</button>
-        ) : (
-          <button onClick={() => { setMode("operario"); setCart([]); }} style={{ fontSize: 12, padding: "5px 12px", background: "#FEF3C7", color: "#78350F", border: "1px solid #F59E0B" }}>
-            ← Modo operario
-          </button>
-        )}
+        <div>
+          {mode === "operario" ? (
+            <button onClick={tryGestion} style={{ fontSize: 12, padding: "5px 12px", cursor: "pointer" }}>⚙ Gestión</button>
+          ) : (
+            <button onClick={() => { setMode("operario"); setShowForm(false); setView("monitor"); }} style={{ fontSize: 12, padding: "5px 12px", background: "#FEF3C7", color: "#78350F", border: "1px solid #F59E0B", cursor: "pointer" }}>← Operario</button>
+          )}
+        </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: "1.25rem" }}>
-        {STAGES.map(s => (
-          <div key={s.key} style={{ background: s.bg, border: `1.5px solid ${s.border}`, borderRadius: 12, padding: "0.75rem", textAlign: "center" }}>
-            <div style={{ fontSize: 28, fontWeight: 700, color: s.fg, lineHeight: 1 }}>{byStage(s.key).length}</div>
-            <div style={{ fontSize: 11, fontWeight: 500, color: s.fg, marginTop: 4, opacity: 0.85 }}>{s.label}</div>
-          </div>
+      <div style={{ display: "flex", gap: 0, marginBottom: "1.25rem", background: "#F1F5F9", borderRadius: 10, padding: 3 }}>
+        {[{ key: "monitor", label: "Monitor" }, { key: "resumen", label: "Resumen del día" }, { key: "historial", label: `Historial (${history.items.length})` }].map(v => (
+          <button key={v.key} onClick={() => setView(v.key)} style={{ flex: 1, fontSize: 12, fontWeight: 600, padding: "7px 8px", background: view === v.key ? "#fff" : "transparent", color: view === v.key ? "#1E293B" : "#64748B", border: "none", borderRadius: 8, boxShadow: view === v.key ? "0 1px 4px rgba(0,0,0,0.1)" : "none", cursor: "pointer" }}>{v.label}</button>
         ))}
       </div>
 
-      {mode === "gestion" && (
-        <div style={{ marginBottom: "1.5rem" }}>
-          <div style={{ display: "flex", gap: 0, marginBottom: "1rem", background: "#F1F5F9", borderRadius: 10, padding: 3 }}>
-            {TABS.map(t => (
-              <button key={t.key} onClick={() => setGTab(t.key)} style={{
-                flex: 1, fontSize: 12, fontWeight: 600, padding: "7px 10px",
-                background: gTab === t.key ? "#fff" : "transparent",
-                color: gTab === t.key ? "#1E293B" : "#64748B",
-                border: "none", borderRadius: 8,
-                boxShadow: gTab === t.key ? "0 1px 4px rgba(0,0,0,0.1)" : "none",
-              }}>{t.label}</button>
+      {view === "monitor" && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: "1.25rem" }}>
+            {STAGES.map(s => (
+              <div key={s.key} style={{ background: s.bg, border: `1.5px solid ${s.border}`, borderRadius: 12, padding: "0.75rem", textAlign: "center" }}>
+                <div style={{ fontSize: 28, fontWeight: 700, color: s.fg, lineHeight: 1 }}>{byStage(s.key).length}</div>
+                <div style={{ fontSize: 11, fontWeight: 500, color: s.fg, marginTop: 4, opacity: 0.85 }}>{s.label}</div>
+              </div>
             ))}
           </div>
 
-          {gTab === "cargar" && (
-            <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: 14, padding: "1rem" }}>
-              <div style={{ marginBottom: 12 }}>
-                <label style={lbl}>Cliente</label>
-                <input placeholder="Nombre del cliente (opcional)" value={cliente}
-                  onChange={e => setCliente(e.target.value)} style={inp} />
-              </div>
-              <div style={{ marginBottom: 12 }}>
-                <label style={lbl}>Código de artículo</label>
-                <div style={{ position: "relative" }}>
-                  <input ref={codeRef} placeholder="Escribí el código o el nombre..."
-                    value={codeInput} onChange={e => handleCodeChange(e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter" && suggestions.length === 1) selectSuggestion(suggestions[0]); }}
-                    style={{ ...inp, paddingRight: 36 }} autoComplete="off" />
-                  {codeInput && (
-                    <button onClick={() => { setCodeInput(""); setSelectedItem(null); setSuggestions([]); codeRef.current?.focus(); }}
-                      style={{ position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", background: "none", border: "none", fontSize: 16, color: "#94A3B8", cursor: "pointer", padding: 0 }}>✕</button>
-                  )}
-                  {suggestions.length > 0 && (
-                    <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: "1.5px solid #CBD5E1", borderRadius: 10, boxShadow: "0 4px 16px rgba(0,0,0,0.12)", zIndex: 30, overflow: "hidden" }}>
-                      {suggestions.map(item => (
-                        <div key={item.id} onClick={() => selectSuggestion(item)}
-                          style={{ padding: "10px 14px", cursor: "pointer", borderBottom: "1px solid #F1F5F9" }}
-                          onMouseEnter={e => e.currentTarget.style.background = "#F8FAFC"}
-                          onMouseLeave={e => e.currentTarget.style.background = "#fff"}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ fontFamily: "monospace", fontSize: 12, color: "#94A3B8", flexShrink: 0 }}>{item.codigo}</span>
-                            <span style={{ fontSize: 13, fontWeight: 600, color: "#1E293B" }}>{item.nombre || item.material}</span>
-                          </div>
-                          <div style={{ display: "flex", gap: 6, marginTop: 3, flexWrap: "wrap" }}>
-                            <span style={{ background: "#EFF6FF", color: "#1D4ED8", fontSize: 11, fontWeight: 600, padding: "1px 7px", borderRadius: 99 }}>{item.material}</span>
-                            {item.espesor && <span style={{ fontSize: 11, color: "#64748B" }}>e:{item.espesor}mm</span>}
-                            {item.color && <span style={{ fontSize: 11, color: "#64748B" }}>· {item.color}</span>}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {codeInput.length > 1 && suggestions.length === 0 && !selectedItem && (
-                    <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "#fff", border: "1.5px solid #FEE2E2", borderRadius: 10, padding: "10px 14px", zIndex: 30 }}>
-                      <span style={{ fontSize: 13, color: "#EF4444" }}>Código no encontrado en el catálogo</span>
-                      <button onClick={() => { setGTab("catalogo"); setEntryForm({ ...EMPTY_ENTRY, codigo: codeInput }); setShowEntryForm(true); setEditId(null); }}
-                        style={{ marginLeft: 10, fontSize: 12, color: "#3B82F6", background: "none", border: "none", cursor: "pointer", textDecoration: "underline", padding: 0 }}>
-                        + Agregar al catálogo
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {selectedItem && (
-                <div style={{ background: "#EFF6FF", border: "1.5px solid #BFDBFE", borderRadius: 10, padding: "10px 14px", marginBottom: 12 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 3 }}>{selectedItem.nombre || selectedItem.material}</div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
-                        <span style={{ background: "#DBEAFE", color: "#1D4ED8", fontSize: 11, fontWeight: 600, padding: "1px 7px", borderRadius: 99 }}>{selectedItem.material}</span>
-                        {selectedItem.espesor && <span style={{ fontSize: 12, color: "#1D4ED8" }}>e:{selectedItem.espesor}mm</span>}
-                        {selectedItem.color && <span style={{ fontSize: 12, color: "#1D4ED8" }}>· {selectedItem.color}</span>}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-                      <label style={{ fontSize: 12, color: "#1D4ED8", fontWeight: 600 }}>Cantidad</label>
-                      <input id="cant-input" type="number" min="1" value={cantidad}
-                        onChange={e => setCantidad(e.target.value)}
-                        onKeyDown={e => e.key === "Enter" && addToCart()}
-                        style={{ ...inp, width: 64, textAlign: "center", padding: "6px 8px" }} />
-                    </div>
+          {mode === "gestion" && (
+            <div style={{ marginBottom: "1.25rem" }}>
+              {!showForm ? (
+                <button onClick={() => setShowForm(true)} style={{ width: "100%", padding: "10px", background: "#1E293B", color: "#fff", border: "none", borderRadius: 10, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>+ Nuevo pedido</button>
+              ) : (
+                <div style={{ background: "#F8FAFC", border: "1.5px solid #3B82F6", borderRadius: 12, padding: "1rem" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Nuevo pedido</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    <input placeholder="Cliente *" value={form.cliente} onChange={e => setForm({ ...form, cliente: e.target.value })} style={inp} autoFocus />
+                    <textarea placeholder="Observaciones: anotá las placas, cantidades, materiales, medidas..." value={form.observaciones} onChange={e => setForm({ ...form, observaciones: e.target.value })} rows={4} style={{ ...inp, resize: "vertical", lineHeight: 1.5 }} />
                   </div>
-                  <button onClick={addToCart} style={{ marginTop: 10, width: "100%", background: "#1D4ED8", color: "#fff", border: "none", fontSize: 13, fontWeight: 600, padding: "8px", borderRadius: 8, cursor: "pointer" }}>
-                    + Agregar a la lista
-                  </button>
-                </div>
-              )}
-
-              {cart.length > 0 && (
-                <div style={{ marginBottom: 12 }}>
-                  <label style={{ ...lbl, marginBottom: 8 }}>Lista del pedido ({cart.length} artículo{cart.length !== 1 ? "s" : ""})</label>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10 }}>
-                    {cart.map(item => (
-                      <div key={item.cartId} style={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 8, padding: "8px 12px", display: "flex", alignItems: "center", gap: 10 }}>
-                        <div style={{ flex: 1 }}>
-                          <span style={{ fontWeight: 600, fontSize: 13, color: "#1E293B" }}>{item.nombre || item.material}</span>
-                          <span style={{ fontSize: 12, color: "#64748B", marginLeft: 8 }}>
-                            {item.material}{item.espesor ? ` · e:${item.espesor}mm` : ""}{item.color ? ` · ${item.color}` : ""}
-                          </span>
-                        </div>
-                        <span style={{ fontWeight: 700, fontSize: 15, color: "#1E293B", minWidth: 32, textAlign: "right" }}>×{item.cantidad}</span>
-                        <button onClick={() => removeFromCart(item.cartId)} style={{ fontSize: 13, padding: "2px 6px", color: "#EF4444", background: "none", border: "none", cursor: "pointer" }}>✕</button>
-                      </div>
-                    ))}
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button onClick={addOrder} style={{ flex: 1, background: "#1E293B", color: "#fff", border: "none", fontSize: 13, fontWeight: 600, padding: "9px", borderRadius: 8, cursor: "pointer" }}>Cargar pedido</button>
+                    <button onClick={() => { setShowForm(false); setForm({ cliente: "", observaciones: "" }); }} style={{ fontSize: 13, padding: "9px 14px", cursor: "pointer" }}>Cancelar</button>
                   </div>
-                  <button onClick={confirmCart} style={{ width: "100%", background: "#22C55E", color: "#fff", border: "none", fontSize: 14, fontWeight: 700, padding: "11px", borderRadius: 10, cursor: "pointer" }}>
-                    ✓ Confirmar y cargar pedido
-                  </button>
-                </div>
-              )}
-
-              {cart.length === 0 && !selectedItem && catalog.items.length === 0 && (
-                <div style={{ textAlign: "center", padding: "1rem", color: "#94A3B8", fontSize: 13 }}>
-                  El catálogo está vacío. Agregá artículos en la pestaña <strong>Catálogo</strong> primero.
                 </div>
               )}
             </div>
           )}
 
-          {gTab === "catalogo" && (
-            <div>
-              <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                <input placeholder="🔍 Buscar código, nombre o material..."
-                  value={catalogSearch} onChange={e => setCatalogSearch(e.target.value)} style={{ ...inp, flex: 1 }} />
-                <button onClick={() => { setShowEntryForm(true); setEditId(null); setEntryForm(EMPTY_ENTRY); }}
-                  style={{ fontSize: 13, padding: "7px 14px", background: "#1E293B", color: "#fff", border: "none", borderRadius: 8, whiteSpace: "nowrap", fontWeight: 500 }}>
-                  + Agregar
-                </button>
+          {STAGES.map(stage => {
+            const items = byStage(stage.key);
+            return (
+              <div key={stage.key} style={{ marginBottom: "1.5rem" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                  <Dot color={stage.dot} size={10} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: stage.fg, textTransform: "uppercase", letterSpacing: "0.06em" }}>{stage.label}</span>
+                  <span style={{ fontSize: 12, background: stage.bg, color: stage.fg, padding: "1px 8px", borderRadius: 99, fontWeight: 700 }}>{items.length}</span>
+                  {stage.key === "completado" && items.length > 0 && (
+                    <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>Se archivan en {ARCHIVE_AFTER_MIN} min</span>
+                  )}
+                </div>
+                {items.length === 0 ? (
+                  <div style={{ border: `1px dashed ${stage.border}`, borderRadius: 10, padding: "1.25rem", textAlign: "center", color: "#94A3B8", fontSize: 13 }}>Sin pedidos</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {items.map(order => {
+                      const stageTs = order.timestamps?.[order.stage];
+                      const elapsed = stageTs ? Date.now() - stageTs : null;
+                      return (
+                        <div key={order.id} style={{ background: "#fff", border: `1.5px solid ${stage.border}`, borderRadius: 12, overflow: "hidden" }}>
+                          <div style={{ padding: "0.875rem 1rem" }}>
+                            <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+                              <span style={{ fontWeight: 700, fontSize: 16, color: "#1E293B" }}>{order.numero}</span>
+                              <span style={{ fontSize: 15, color: "#1E293B", fontWeight: 500 }}>{order.cliente}</span>
+                              <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>{order.hora} · {timeAgo(stageTs)}</span>
+                            </div>
+                            {order.observaciones && (
+                              <div style={{ fontSize: 13, color: "#334155", lineHeight: 1.6, background: "#F8FAFC", borderRadius: 8, padding: "8px 10px", borderLeft: `3px solid ${stage.border}`, whiteSpace: "pre-wrap" }}>
+                                {order.observaciones}
+                              </div>
+                            )}
+                            {elapsed && elapsed > 0 && (
+                              <div style={{ fontSize: 11, color: "#94A3B8", marginTop: 6 }}>⏱ {fmt(elapsed)} en esta etapa</div>
+                            )}
+                          </div>
+                          <div style={{ borderTop: `1px solid ${stage.bg}`, padding: "0.5rem 1rem", background: stage.bg, display: "flex", gap: 6, alignItems: "center" }}>
+                            {mode === "gestion" && order.stage !== "activo" && (
+                              <button onClick={() => goBack(order.id)} style={{ fontSize: 12, padding: "4px 10px", color: "#64748B", cursor: "pointer" }}>← Atrás</button>
+                            )}
+                            {order.stage !== "completado" ? (
+                              <button onClick={() => advance(order.id)} style={{ flex: 1, fontSize: 13, fontWeight: 700, padding: "7px 12px", background: NEXT_COLOR[order.stage], color: "#fff", border: "none", borderRadius: 8, cursor: "pointer" }}>
+                                {NEXT_LABEL[order.stage]}
+                              </button>
+                            ) : (
+                              <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: "#14532D", textAlign: "center" }}>✓ Finalizado</div>
+                            )}
+                            {mode === "gestion" && (
+                              <>
+                                {order.stage === "completado" && (
+                                  <button onClick={() => archiveNow(order.id)} title="Archivar ahora" style={{ fontSize: 12, padding: "4px 8px", color: "#3B82F6", cursor: "pointer" }}>📁</button>
+                                )}
+                                <button onClick={() => deleteOrder(order.id)} style={{ fontSize: 12, padding: "4px 8px", color: "#EF4444", cursor: "pointer" }}>🗑</button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
+            );
+          })}
+        </>
+      )}
 
-              {showEntryForm && (
-                <div style={{ background: "#F8FAFC", border: "1.5px solid #3B82F6", borderRadius: 12, padding: "1rem", marginBottom: 12 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 12 }}>
-                    {editId !== null ? "✏ Editar artículo" : "➕ Nuevo artículo"}
-                  </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-                    <div>
-                      <label style={lbl}>Código *</label>
-                      <input placeholder="ej: 180001518G068CE" value={entryForm.codigo}
-                        onChange={e => setEntryForm({ ...entryForm, codigo: e.target.value })}
-                        style={{ ...inp, fontFamily: "monospace" }} disabled={editId !== null} />
-                    </div>
-                    <div>
-                      <label style={lbl}>Nombre comercial</label>
-                      <input placeholder="ej: Melamínico Blanco 18mm" value={entryForm.nombre}
-                        onChange={e => setEntryForm({ ...entryForm, nombre: e.target.value })} style={inp} />
-                    </div>
-                    <div>
-                      <label style={lbl}>Material *</label>
-                      <input placeholder="ej: Melamínico s/aglomerado" value={entryForm.material}
-                        onChange={e => setEntryForm({ ...entryForm, material: e.target.value })} style={inp} />
-                    </div>
-                    <div>
-                      <label style={lbl}>Espesor (mm)</label>
-                      <input placeholder="ej: 18" value={entryForm.espesor} type="number"
-                        onChange={e => setEntryForm({ ...entryForm, espesor: e.target.value })} style={inp} />
-                    </div>
-                    <div>
-                      <label style={lbl}>Color / terminación</label>
-                      <input placeholder="ej: Blanco, Natural, Roble" value={entryForm.color}
-                        onChange={e => setEntryForm({ ...entryForm, color: e.target.value })} style={inp} />
-                    </div>
-                    <div>
-                      <label style={lbl}>Notas</label>
-                      <input placeholder="observaciones opcionales" value={entryForm.notas}
-                        onChange={e => setEntryForm({ ...entryForm, notas: e.target.value })} style={inp} />
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={saveEntry} style={{ flex: 1, background: "#1E293B", color: "#fff", border: "none", fontSize: 13, fontWeight: 600, padding: "9px", borderRadius: 8 }}>
-                      {editId !== null ? "Guardar cambios" : "Agregar al catálogo"}
-                    </button>
-                    <button onClick={() => { setShowEntryForm(false); setEditId(null); setEntryForm(EMPTY_ENTRY); }} style={{ fontSize: 13, padding: "9px 14px" }}>Cancelar</button>
-                  </div>
+      {view === "resumen" && (
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: "1rem" }}>
+            📊 Resumen del día — {new Date().toLocaleDateString("es-AR", { weekday: "long", day: "numeric", month: "long" })}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: "1.5rem" }}>
+            {[
+              { label: "Pedidos ingresados hoy",  value: todayOrders.length,      color: "#64748B" },
+              { label: "Pedidos completados hoy", value: completedToday.length,   color: "#22C55E" },
+              { label: "En proceso ahora",        value: data.orders.filter(o => o.stage !== "completado").length, color: "#3B82F6" },
+              { label: "Esperando en cola",       value: byStage("activo").length, color: "#F59E0B" },
+            ].map((k, i) => (
+              <div key={i} style={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 12, padding: "1rem", textAlign: "center" }}>
+                <div style={{ fontSize: 32, fontWeight: 700, color: k.color, lineHeight: 1 }}>{k.value}</div>
+                <div style={{ fontSize: 12, color: "#64748B", marginTop: 6 }}>{k.label}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>Tiempos promedio por etapa</div>
+          {completedToday.length === 0 ? (
+            <div style={{ background: "#F8FAFC", borderRadius: 10, padding: "1.5rem", textAlign: "center", color: "#94A3B8", fontSize: 13 }}>Todavía no hay pedidos completados hoy para calcular tiempos.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: "1.5rem" }}>
+              {[
+                { label: "⏱ Tiempo en Corte",         value: avgCorte,  color: "#EF4444", bg: "#FEE2E2" },
+                { label: "⏱ Tiempo en Canteo",        value: avgCanteo, color: "#F59E0B", bg: "#FEF3C7" },
+                { label: "⏱ Tiempo total por pedido", value: avgTotal,  color: "#22C55E", bg: "#DCFCE7" },
+              ].map((t, i) => (
+                <div key={i} style={{ background: t.bg, borderRadius: 10, padding: "0.875rem 1rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 13, color: "#1E293B", fontWeight: 500 }}>{t.label}</span>
+                  <span style={{ fontSize: 18, fontWeight: 700, color: t.color }}>{fmt(t.value)}</span>
                 </div>
-              )}
-
-              {catalog.items.length === 0 ? (
-                <div style={{ border: "1px dashed #CBD5E1", borderRadius: 10, padding: "2rem", textAlign: "center", color: "#94A3B8", fontSize: 13 }}>
-                  <div style={{ fontSize: 28, marginBottom: 8 }}>📦</div>
-                  Catálogo vacío. Agregá el primer artículo.
-                </div>
-              ) : filteredCatalog.length === 0 ? (
-                <div style={{ textAlign: "center", color: "#94A3B8", fontSize: 13, padding: "1.5rem" }}>Sin resultados para "{catalogSearch}"</div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {filteredCatalog.map(item => (
-                    <div key={item.id} style={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 10, padding: "0.75rem", display: "flex", alignItems: "center", gap: 10 }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3, flexWrap: "wrap" }}>
-                          <span style={{ fontFamily: "monospace", fontSize: 12, fontWeight: 700, color: "#1E293B" }}>{item.codigo}</span>
-                          {item.nombre && <span style={{ fontSize: 13, color: "#475569" }}>{item.nombre}</span>}
-                        </div>
-                        <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
-                          <span style={{ background: "#EFF6FF", color: "#1D4ED8", fontSize: 11, fontWeight: 600, padding: "1px 7px", borderRadius: 99 }}>{item.material}</span>
-                          {item.espesor && <span style={{ fontSize: 12, color: "#64748B" }}>e:{item.espesor}mm</span>}
-                          {item.color && <span style={{ fontSize: 12, color: "#64748B" }}>· {item.color}</span>}
-                          {item.notas && <span style={{ fontSize: 11, color: "#94A3B8", fontStyle: "italic" }}>· {item.notas}</span>}
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
-                        <button onClick={() => editEntry(item)} style={{ fontSize: 12, padding: "4px 9px", color: "#3B82F6" }}>✏</button>
-                        <button onClick={() => deleteEntry(item.id)} style={{ fontSize: 12, padding: "4px 9px", color: "#EF4444" }}>🗑</button>
-                      </div>
-                    </div>
-                  ))}
-                  <div style={{ fontSize: 11, color: "#94A3B8", textAlign: "center", marginTop: 4 }}>
-                    {catalog.items.length} artículo{catalog.items.length !== 1 ? "s" : ""} en el catálogo
-                  </div>
-                </div>
-              )}
+              ))}
             </div>
+          )}
+          {completedToday.length > 0 && (
+            <>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#1E293B", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.05em" }}>Pedidos completados hoy ({completedToday.length})</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {completedToday.map(order => {
+                  const total = order.timestamps?.completado && order.timestamps?.activo ? order.timestamps.completado - order.timestamps.activo : null;
+                  return (
+                    <div key={order.id} style={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 10, padding: "0.75rem 1rem", display: "flex", gap: 10, alignItems: "flex-start" }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2 }}>{order.numero} · {order.cliente}</div>
+                        {order.observaciones && <div style={{ fontSize: 12, color: "#64748B", whiteSpace: "pre-wrap" }}>{order.observaciones}</div>}
+                      </div>
+                      {total && <div style={{ fontSize: 12, color: "#22C55E", fontWeight: 700, flexShrink: 0 }}>{fmt(total)}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
           )}
         </div>
       )}
 
-      {STAGES.map(stage => {
-        const items = byStage(stage.key);
-        return (
-          <div key={stage.key} style={{ marginBottom: "1.5rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-              <Dot color={stage.dot} size={10} />
-              <span style={{ fontSize: 13, fontWeight: 600, color: stage.fg, textTransform: "uppercase", letterSpacing: "0.06em" }}>{stage.label}</span>
-              <span style={{ fontSize: 12, background: stage.bg, color: stage.fg, padding: "1px 8px", borderRadius: 99, fontWeight: 600 }}>{items.length}</span>
-            </div>
-            {items.length === 0 ? (
-              <div style={{ border: `1px dashed ${stage.border}`, borderRadius: 10, padding: "1.25rem", textAlign: "center", color: "#94A3B8", fontSize: 13 }}>Sin pedidos</div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {items.map(order => (
-                  <div key={order.id} style={{ background: "#fff", border: `1.5px solid ${stage.border}`, borderRadius: 12, overflow: "hidden" }}>
-                    <div style={{ padding: "0.875rem 1rem" }}>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
-                        <span style={{ fontWeight: 700, fontSize: 15, color: "#1E293B" }}>{order.numero}</span>
-                        <span style={{ fontSize: 15, color: "#1E293B" }}>{order.cliente}</span>
-                        <span style={{ fontSize: 11, color: "#94A3B8", marginLeft: "auto" }}>{order.hora}</span>
-                      </div>
-                      {order.nombre && <div style={{ fontSize: 13, fontWeight: 600, color: "#334155", marginBottom: 3 }}>{order.nombre}</div>}
-                      <div style={{ fontSize: 13, color: "#475569", display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                        <span style={{ background: "#EFF6FF", color: "#1D4ED8", fontSize: 12, fontWeight: 600, padding: "1px 8px", borderRadius: 99 }}>{order.material}</span>
-                        {order.espesor && <span>e: {order.espesor}mm</span>}
-                        {order.color && order.color !== "Natural" && <span>· {order.color}</span>}
-                        <span style={{ fontWeight: 600, color: "#1E293B" }}>×{order.cantidad}</span>
-                        {order.notas && <span style={{ fontSize: 12, color: "#94A3B8", fontStyle: "italic" }}>· {order.notas}</span>}
-                      </div>
-                    </div>
-                    <div style={{ borderTop: `1px solid ${stage.bg}`, padding: "0.5rem 1rem", background: stage.bg, display: "flex", gap: 6, alignItems: "center" }}>
-                      {mode === "gestion" && order.stage !== "activo" && (
-                        <button onClick={() => goBack(order.id)} style={{ fontSize: 12, padding: "4px 10px", color: "#64748B" }}>← Atrás</button>
-                      )}
-                      {order.stage !== "completado" ? (
-                        <button onClick={() => advance(order.id)}
-                          style={{ flex: 1, fontSize: 13, fontWeight: 600, padding: "7px 12px", background: NEXT_COLOR[order.stage], color: "#fff", border: "none", borderRadius: 8, cursor: "pointer" }}>
-                          {NEXT_LABEL[order.stage]}
-                        </button>
-                      ) : (
-                        <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: "#14532D", textAlign: "center" }}>✓ Finalizado</div>
-                      )}
-                      {mode === "gestion" && (
-                        <button onClick={() => deleteOrder(order.id)} style={{ fontSize: 12, padding: "4px 8px", color: "#EF4444" }}>🗑</button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
+      {view === "historial" && (
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>🗂 Historial de pedidos</div>
+            {mode === "gestion" && history.items.length > 0 && (
+              <button onClick={clearHistory} style={{ fontSize: 12, padding: "5px 12px", color: "#EF4444", cursor: "pointer" }}>🗑 Borrar todo</button>
             )}
           </div>
-        );
-      })}
+          {history.items.length === 0 ? (
+            <div style={{ border: "1px dashed #CBD5E1", borderRadius: 10, padding: "2.5rem", textAlign: "center", color: "#94A3B8", fontSize: 13 }}>
+              <div style={{ fontSize: 28, marginBottom: 8 }}>🗂</div>
+              El historial está vacío. Los pedidos completados aparecen acá después de {ARCHIVE_AFTER_MIN} minutos.
+            </div>
+          ) : (
+            <>
+              {historyToday.length > 0 && (
+                <div style={{ marginBottom: "1.5rem" }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Hoy ({historyToday.length})</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {historyToday.map(order => <HistoryCard key={order.id} order={order} />)}
+                  </div>
+                </div>
+              )}
+              {historyOld.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "#64748B", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>Anteriores ({historyOld.length})</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {historyOld.map(order => <HistoryCard key={order.id} order={order} />)}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HistoryCard({ order }) {
+  const total = order.timestamps?.completado && order.timestamps?.activo ? order.timestamps.completado - order.timestamps.activo : null;
+  const fechaCompleto = order.timestamps?.completado
+    ? new Date(order.timestamps.completado).toLocaleString("es-AR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : order.hora;
+  return (
+    <div style={{ background: "#fff", border: "1px solid #E2E8F0", borderRadius: 10, padding: "0.75rem 1rem" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: "monospace", fontSize: 12, color: "#94A3B8" }}>{order.numero}</span>
+        <span style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }}>{order.cliente}</span>
+        <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>{fechaCompleto}</span>
+        {total && (
+          <span style={{ fontSize: 11, background: "#DCFCE7", color: "#14532D", padding: "1px 7px", borderRadius: 99, fontWeight: 600 }}>
+            {fmt(total)} total
+          </span>
+        )}
+      </div>
+      {order.observaciones && (
+        <div style={{ fontSize: 12, color: "#64748B", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{order.observaciones}</div>
+      )}
     </div>
   );
 }

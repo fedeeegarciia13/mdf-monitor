@@ -15,8 +15,19 @@ const STAGES = [
   { key: "completado", label: "Completados",     dot: "#22C55E", bg: "#DCFCE7", fg: "#14532D", border: "#22C55E" },
 ];
 const SEQ = ["activo", "corte", "canteo", "completado"];
-const NEXT_LABEL = { activo: "Enviar a Corte", corte: "Enviar a Canteo", canteo: "Marcar Completo" };
-const NEXT_COLOR = { activo: "#EF4444", corte: "#F59E0B", canteo: "#22C55E" };
+
+function nextLabel(order) {
+  if (order.stage === "activo") return "Enviar a Corte";
+  if (order.stage === "corte")  return order.canto ? "Enviar a Canteo" : "Marcar Completo";
+  if (order.stage === "canteo") return "Marcar Completo";
+  return "";
+}
+function nextColor(order) {
+  if (order.stage === "activo") return "#EF4444";
+  if (order.stage === "corte")  return order.canto ? "#F59E0B" : "#22C55E";
+  if (order.stage === "canteo") return "#22C55E";
+  return "#22C55E";
+}
 
 const EMPTY_ORDERS  = { orders: [], nextId: 1 };
 const EMPTY_HISTORY = { items: [] };
@@ -79,7 +90,7 @@ export default function App() {
   const [confirmPin, setConfirmPin] = useState(false);
   const [pinInput, setPinInput]     = useState("");
   const [showForm, setShowForm]     = useState(false);
-  const [form, setForm]             = useState({ cliente: "", observaciones: "" });
+  const [form, setForm]             = useState({ cliente: "", observaciones: "", canto: false });
   const [now, setNow]               = useState(Date.now());
 
   const showToast = (msg, type = "ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2800); };
@@ -135,12 +146,13 @@ export default function App() {
       numero: `PED-${String(data.nextId).padStart(4, "0")}`,
       cliente: form.cliente.trim(),
       observaciones: form.observaciones.trim(),
+      canto: form.canto,
       stage: "activo",
       hora: new Date().toLocaleTimeString("es-AR", { hour: "2-digit", minute: "2-digit" }),
       timestamps: { activo: ts },
     };
     saveData({ orders: [...data.orders, order], nextId: data.nextId + 1 });
-    setForm({ cliente: "", observaciones: "" });
+    setForm({ cliente: "", observaciones: "", canto: false });
     setShowForm(false);
     showToast(`${order.numero} cargado`);
   };
@@ -151,7 +163,8 @@ export default function App() {
       if (o.id !== id) return o;
       const i = SEQ.indexOf(o.stage);
       if (i >= SEQ.length - 1) return o;
-      const nextStage = SEQ[i + 1];
+      let nextStage = SEQ[i + 1];
+      if (nextStage === "canteo" && !o.canto) nextStage = "completado";
       return { ...o, stage: nextStage, timestamps: { ...o.timestamps, [nextStage]: ts } };
     })});
   };
@@ -256,6 +269,7 @@ export default function App() {
         ))}
       </div>
 
+      {/* ── MONITOR ── */}
       {view === "monitor" && (
         <>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 8, marginBottom: "1.25rem" }}>
@@ -277,10 +291,17 @@ export default function App() {
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     <input placeholder="Cliente *" value={form.cliente} onChange={e => setForm({ ...form, cliente: e.target.value })} style={inp} autoFocus />
                     <textarea placeholder="Observaciones: anotá las placas, cantidades, materiales, medidas..." value={form.observaciones} onChange={e => setForm({ ...form, observaciones: e.target.value })} rows={4} style={{ ...inp, resize: "vertical", lineHeight: 1.5 }} />
+                    <label style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer", userSelect: "none", padding: "10px 12px", borderRadius: 10, border: `2px solid ${form.canto ? "#7C3AED" : "#E2E8F0"}`, background: form.canto ? "#EDE9FE" : "#F8FAFC" }}>
+                      <input type="checkbox" checked={form.canto} onChange={e => setForm({ ...form, canto: e.target.checked })} style={{ width: 18, height: 18, accentColor: "#7C3AED", cursor: "pointer", flexShrink: 0 }} />
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: form.canto ? "#4C1D95" : "#1E293B" }}>{form.canto ? "✓ Lleva canto" : "Sin canto"}</div>
+                        <div style={{ fontSize: 11, color: form.canto ? "#6D28D9" : "#94A3B8", marginTop: 1 }}>{form.canto ? "Pasará por Corte → Canteo → Completado" : "Pasará por Corte → Completado (saltea Canteo)"}</div>
+                      </div>
+                    </label>
                   </div>
                   <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                     <button onClick={addOrder} style={{ flex: 1, background: "#1E293B", color: "#fff", border: "none", fontSize: 13, fontWeight: 600, padding: "9px", borderRadius: 8, cursor: "pointer" }}>Cargar pedido</button>
-                    <button onClick={() => { setShowForm(false); setForm({ cliente: "", observaciones: "" }); }} style={{ fontSize: 13, padding: "9px 14px", cursor: "pointer" }}>Cancelar</button>
+                    <button onClick={() => { setShowForm(false); setForm({ cliente: "", observaciones: "", canto: false }); }} style={{ fontSize: 13, padding: "9px 14px", cursor: "pointer" }}>Cancelar</button>
                   </div>
                 </div>
               )}
@@ -312,6 +333,10 @@ export default function App() {
                             <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
                               <span style={{ fontWeight: 700, fontSize: 16, color: "#1E293B" }}>{order.numero}</span>
                               <span style={{ fontSize: 15, color: "#1E293B", fontWeight: 500 }}>{order.cliente}</span>
+                              {order.canto
+                                ? <span style={{ fontSize: 11, fontWeight: 700, background: "#EDE9FE", color: "#4C1D95", padding: "2px 8px", borderRadius: 99 }}>Con canto</span>
+                                : <span style={{ fontSize: 11, fontWeight: 600, background: "#F1F5F9", color: "#64748B", padding: "2px 8px", borderRadius: 99 }}>Sin canto</span>
+                              }
                               <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>{order.hora} · {timeAgo(stageTs)}</span>
                             </div>
                             {order.observaciones && (
@@ -328,8 +353,8 @@ export default function App() {
                               <button onClick={() => goBack(order.id)} style={{ fontSize: 12, padding: "4px 10px", color: "#64748B", cursor: "pointer" }}>← Atrás</button>
                             )}
                             {order.stage !== "completado" ? (
-                              <button onClick={() => advance(order.id)} style={{ flex: 1, fontSize: 13, fontWeight: 700, padding: "7px 12px", background: NEXT_COLOR[order.stage], color: "#fff", border: "none", borderRadius: 8, cursor: "pointer" }}>
-                                {NEXT_LABEL[order.stage]}
+                              <button onClick={() => advance(order.id)} style={{ flex: 1, fontSize: 13, fontWeight: 700, padding: "7px 12px", background: nextColor(order), color: "#fff", border: "none", borderRadius: 8, cursor: "pointer" }}>
+                                {nextLabel(order)}
                               </button>
                             ) : (
                               <div style={{ flex: 1, fontSize: 13, fontWeight: 500, color: "#14532D", textAlign: "center" }}>✓ Finalizado</div>
@@ -354,6 +379,7 @@ export default function App() {
         </>
       )}
 
+      {/* ── RESUMEN ── */}
       {view === "resumen" && (
         <div>
           <div style={{ fontSize: 15, fontWeight: 700, marginBottom: "1rem" }}>
@@ -411,6 +437,7 @@ export default function App() {
         </div>
       )}
 
+      {/* ── HISTORIAL ── */}
       {view === "historial" && (
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
@@ -460,12 +487,9 @@ function HistoryCard({ order }) {
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
         <span style={{ fontFamily: "monospace", fontSize: 12, color: "#94A3B8" }}>{order.numero}</span>
         <span style={{ fontWeight: 700, fontSize: 14, color: "#1E293B" }}>{order.cliente}</span>
+        {order.canto && <span style={{ fontSize: 11, background: "#EDE9FE", color: "#4C1D95", padding: "1px 7px", borderRadius: 99, fontWeight: 600 }}>Con canto</span>}
         <span style={{ marginLeft: "auto", fontSize: 11, color: "#94A3B8" }}>{fechaCompleto}</span>
-        {total && (
-          <span style={{ fontSize: 11, background: "#DCFCE7", color: "#14532D", padding: "1px 7px", borderRadius: 99, fontWeight: 600 }}>
-            {fmt(total)} total
-          </span>
-        )}
+        {total && <span style={{ fontSize: 11, background: "#DCFCE7", color: "#14532D", padding: "1px 7px", borderRadius: 99, fontWeight: 600 }}>{fmt(total)} total</span>}
       </div>
       {order.observaciones && (
         <div style={{ fontSize: 12, color: "#64748B", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{order.observaciones}</div>

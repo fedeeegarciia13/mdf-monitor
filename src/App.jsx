@@ -91,6 +91,8 @@ export default function App() {
   const [pinInput, setPinInput]     = useState("");
   const [showForm, setShowForm]     = useState(false);
   const [form, setForm]             = useState({ cliente: "", observaciones: "", canto: false });
+  const [editingId, setEditingId]   = useState(null);
+  const [editForm, setEditForm]     = useState({ cliente: "", observaciones: "", canto: false });
   const [now, setNow]               = useState(Date.now());
 
   const showToast = (msg, type = "ok") => { setToast({ msg, type }); setTimeout(() => setToast(null), 2800); };
@@ -181,6 +183,20 @@ export default function App() {
     })});
   };
 
+  const startEdit = (order) => {
+    setEditingId(order.id);
+    setEditForm({ cliente: order.cliente, observaciones: order.observaciones || "", canto: order.canto || false });
+  };
+
+  const saveEdit = () => {
+    if (!editForm.cliente.trim()) { showToast("El cliente no puede estar vacío", "err"); return; }
+    saveData({ ...data, orders: data.orders.map(o =>
+      o.id === editingId ? { ...o, cliente: editForm.cliente.trim(), observaciones: editForm.observaciones.trim(), canto: editForm.canto } : o
+    )});
+    setEditingId(null);
+    showToast("Pedido actualizado");
+  };
+
   const deleteOrder = (id) => {
     saveData({ ...data, orders: data.orders.filter(o => o.id !== id) });
     showToast("Pedido eliminado");
@@ -244,6 +260,30 @@ export default function App() {
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={checkPin} style={{ flex: 1, background: "#1E293B", color: "#fff", border: "none", fontSize: 14, padding: "8px", borderRadius: 8, cursor: "pointer" }}>Entrar</button>
               <button onClick={() => setConfirmPin(false)} style={{ fontSize: 14, padding: "8px 14px", cursor: "pointer" }}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal edición */}
+      {editingId !== null && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: "1rem" }}>
+          <div style={{ background: "#fff", borderRadius: 16, padding: "1.5rem", width: "100%", maxWidth: 400, boxShadow: "0 8px 32px rgba(0,0,0,0.18)" }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>✏ Editar pedido</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <input placeholder="Cliente *" value={editForm.cliente} onChange={e => setEditForm({ ...editForm, cliente: e.target.value })} style={{ fontSize: 13, padding: "8px 10px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#fff", width: "100%", boxSizing: "border-box" }} autoFocus />
+              <textarea placeholder="Observaciones..." value={editForm.observaciones} onChange={e => setEditForm({ ...editForm, observaciones: e.target.value })} rows={4} style={{ fontSize: 13, padding: "8px 10px", borderRadius: 8, border: "1px solid #CBD5E1", background: "#fff", width: "100%", boxSizing: "border-box", resize: "vertical", lineHeight: 1.5 }} />
+              <label style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer", userSelect: "none", padding: "10px 12px", borderRadius: 10, border: `2px solid ${editForm.canto ? "#7C3AED" : "#E2E8F0"}`, background: editForm.canto ? "#EDE9FE" : "#F8FAFC" }}>
+                <input type="checkbox" checked={editForm.canto} onChange={e => setEditForm({ ...editForm, canto: e.target.checked })} style={{ width: 18, height: 18, accentColor: "#7C3AED", cursor: "pointer", flexShrink: 0 }} />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: editForm.canto ? "#4C1D95" : "#1E293B" }}>{editForm.canto ? "✓ Lleva canto" : "Sin canto"}</div>
+                  <div style={{ fontSize: 11, color: editForm.canto ? "#6D28D9" : "#94A3B8", marginTop: 1 }}>{editForm.canto ? "Corte → Canteo → Completado" : "Corte → Completado (saltea Canteo)"}</div>
+                </div>
+              </label>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+              <button onClick={saveEdit} style={{ flex: 1, background: "#1E293B", color: "#fff", border: "none", fontSize: 13, fontWeight: 600, padding: "9px", borderRadius: 8, cursor: "pointer" }}>Guardar cambios</button>
+              <button onClick={() => setEditingId(null)} style={{ fontSize: 13, padding: "9px 14px", cursor: "pointer" }}>Cancelar</button>
             </div>
           </div>
         </div>
@@ -361,8 +401,9 @@ export default function App() {
                             )}
                             {mode === "gestion" && (
                               <>
+                                <button onClick={() => startEdit(order)} title="Editar" style={{ fontSize: 12, padding: "4px 8px", color: "#3B82F6", cursor: "pointer" }}>✏</button>
                                 {order.stage === "completado" && (
-                                  <button onClick={() => archiveNow(order.id)} title="Archivar ahora" style={{ fontSize: 12, padding: "4px 8px", color: "#3B82F6", cursor: "pointer" }}>📁</button>
+                                  <button onClick={() => archiveNow(order.id)} title="Archivar ahora" style={{ fontSize: 12, padding: "4px 8px", color: "#64748B", cursor: "pointer" }}>📁</button>
                                 )}
                                 <button onClick={() => deleteOrder(order.id)} style={{ fontSize: 12, padding: "4px 8px", color: "#EF4444", cursor: "pointer" }}>🗑</button>
                               </>

@@ -377,10 +377,19 @@ export default function App() {
                   <div style={{fontSize:13,fontWeight:700,marginBottom:12}}>Nuevo pedido</div>
                   <div style={{display:"flex",flexDirection:"column",gap:8}}>
                     <input placeholder="Cliente *" value={form.cliente} onChange={function(e){setForm(Object.assign({},form,{cliente:e.target.value}));}} style={inp}/>
-                    <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:8}}>
-                      <input placeholder="Observaciones: materiales, medidas..." value={form.observaciones} onChange={function(e){setForm(Object.assign({},form,{observaciones:e.target.value}));}} style={inp}/>
-                      <input type="number" min="1" placeholder="Nº placas" value={form.cantidadPlacas} onChange={function(e){setForm(Object.assign({},form,{cantidadPlacas:e.target.value}));}} style={Object.assign({},inp,{textAlign:"center",fontWeight:700})}/>
-                    </div>
+                    <textarea
+                      placeholder="Observaciones: materiales, medidas, instrucciones especiales..."
+                      value={form.observaciones}
+                      onChange={function(e){setForm(Object.assign({},form,{observaciones:e.target.value}));}}
+                      rows={5}
+                      style={Object.assign({},inp,{resize:"vertical",lineHeight:1.6})}
+                    />
+                    <input
+                      type="number" min="1" placeholder="Cantidad de placas (número)"
+                      value={form.cantidadPlacas}
+                      onChange={function(e){setForm(Object.assign({},form,{cantidadPlacas:e.target.value}));}}
+                      style={Object.assign({},inp,{textAlign:"center",fontWeight:700})}
+                    />
                     <label style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",userSelect:"none",padding:"10px 12px",borderRadius:10,border:"2px solid "+(form.canto?"#7C3AED":"#E2E8F0"),background:form.canto?"#EDE9FE":"#F8FAFC"}}>
                       <input type="checkbox" checked={form.canto} onChange={function(e){setForm(Object.assign({},form,{canto:e.target.checked}));}} style={{width:18,height:18,accentColor:"#7C3AED",cursor:"pointer",flexShrink:0}}/>
                       <div>

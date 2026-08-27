@@ -29,22 +29,34 @@ const SUPABASE_URL = "https://ykygszjqqnkgqjowbanj.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlreWdzempxcW5rZ3Fqb3diYW5qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MTExMDMsImV4cCI6MjA5NTk4NzEwM30.K24YPH1WeN7eUGpG2OJqfxYCYfNFm5DOxwWiictT_3Y";
 
 async function sbGet(key) {
-  const res = await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos?key=eq."+key+"&select=value",{
+  const res = await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos?key=eq."+key+"&select=value,version",{
     headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY}
   });
   const data = await res.json();
-  if(data&&data.length>0) return JSON.parse(data[0].value);
+  if(data&&data.length>0) return { value:JSON.parse(data[0].value), version:data[0].version };
   return null;
 }
-async function sbSet(key,value) {
-  await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos",{
-    method:"POST",
-    headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates"},
-    body:JSON.stringify({key:key,value:JSON.stringify(value),updated_at:new Date().toISOString()})
+class VersionConflictError extends Error {}
+async function sbSet(key,value,expectedVersion) {
+  if (expectedVersion==null) {
+    await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos",{
+      method:"POST",
+      headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates"},
+      body:JSON.stringify({key:key,value:JSON.stringify(value),version:1,updated_at:new Date().toISOString()})
+    });
+    return 1;
+  }
+  const res = await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos?key=eq."+key+"&version=eq."+expectedVersion,{
+    method:"PATCH",
+    headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json","Prefer":"return=representation"},
+    body:JSON.stringify({value:JSON.stringify(value),version:expectedVersion+1,updated_at:new Date().toISOString()})
   });
+  const rows = await res.json();
+  if (!rows || rows.length===0) throw new VersionConflictError();
+  return expectedVersion+1;
 }
 
-const EMPTY_ORDERS  = { orders:[], nextId:1 };
+const EMPTY_ORDERS  = { orders:[] };
 const EMPTY_HISTORY = { items:[] };
 
 function getSeq(o)     { return o.canto ? SEQ_CON : SEQ_SIN; }
@@ -158,7 +170,10 @@ export default function App() {
   var [scope,   setScope]   = useState("hoy");
   var [filter,  setFilter]  = useState("todos");
   var [tick,    setTick]    = useState(Date.now());
+  var [saveError, setSaveError] = useState(null);
   var lastWrite = useRef(0);
+  var ordersVersion = useRef(null);
+  var historyVersion = useRef(null);
 
   function toast_(msg,type){ setToast({msg:msg,type:type||"ok"}); setTimeout(function(){setToast(null);},2800); }
 
@@ -168,28 +183,56 @@ export default function App() {
     if (Date.now()-lastWrite.current<8000) return;
     try {
       var r=await sbGet(ORDERS_KEY);
-      if(r&&Array.isArray(r.orders)) setOrders(r); else setOrders(function(prev){return prev||EMPTY_ORDERS;});
+      if(r&&r.value&&Array.isArray(r.value.orders)){ setOrders(r.value); ordersVersion.current=r.version; }
+      else setOrders(function(prev){return prev||EMPTY_ORDERS;});
     } catch(e){ setOrders(function(prev){return prev||EMPTY_ORDERS;}); }
   },[]);
 
   var loadHistory = useCallback(async function(){
     try {
       var r=await sbGet(HISTORY_KEY);
-      if(r&&Array.isArray(r.items)) setHistory(r); else setHistory(function(prev){return prev||EMPTY_HISTORY;});
+      if(r&&r.value&&Array.isArray(r.value.items)){ setHistory(r.value); historyVersion.current=r.version; }
+      else setHistory(function(prev){return prev||EMPTY_HISTORY;});
     } catch(e){ setHistory(function(prev){return prev||EMPTY_HISTORY;}); }
   },[]);
 
   var saveOrders = useCallback(async function(next){
-    lastWrite.current=Date.now(); setOrders(next);
-    try { await sbSet(ORDERS_KEY,next); }
-    catch(e){ toast_("Error al guardar","err"); }
-  },[]);
+    var prev;
+    setOrders(function(cur){ prev=cur; return next; });
+    lastWrite.current=Date.now();
+    try {
+      var newVersion=await sbSet(ORDERS_KEY,next,ordersVersion.current);
+      ordersVersion.current=newVersion;
+      setSaveError(null);
+    } catch(e){
+      lastWrite.current=0;
+      setOrders(prev);
+      if (e instanceof VersionConflictError) {
+        setSaveError("Otro dispositivo guardó un cambio justo antes que vos. Actualicé la vista con lo último — repetí tu acción si hace falta.");
+        loadOrders();
+      } else {
+        setSaveError("No se pudo guardar el último cambio. No se perdió nada — el pedido sigue como estaba antes. Reintentá.");
+      }
+    }
+  },[loadOrders]);
 
   var saveHistory = useCallback(async function(next){
-    setHistory(next);
-    try { await sbSet(HISTORY_KEY,next); }
-    catch(e){ toast_("Error al guardar historial","err"); }
-  },[]);
+    var prev;
+    setHistory(function(cur){ prev=cur; return next; });
+    try {
+      var newVersion=await sbSet(HISTORY_KEY,next,historyVersion.current);
+      historyVersion.current=newVersion;
+      setSaveError(null);
+    } catch(e){
+      setHistory(prev);
+      if (e instanceof VersionConflictError) {
+        setSaveError("Otro dispositivo guardó un cambio en el historial justo antes que vos. Actualicé la vista con lo último.");
+        loadHistory();
+      } else {
+        setSaveError("No se pudo guardar el historial. No se perdió nada. Reintentá.");
+      }
+    }
+  },[loadHistory]);
 
   useEffect(function(){
     loadOrders(); loadHistory();
@@ -212,9 +255,10 @@ export default function App() {
 
   function addOrder(){
     if (!form.cliente.trim()){ toast_("Ingresá el nombre del cliente","err"); return; }
-    var ts=Date.now(), id=orders.nextId;
+    var ts=Date.now(), id=crypto.randomUUID();
+    var displayNum=orders.orders.length+history.items.length+1;
     var o={
-      id:id, numero:"PED-"+String(id).padStart(4,"0"),
+      id:id, numero:"PED-"+String(displayNum).padStart(4,"0"),
       cliente:form.cliente.trim(), observaciones:form.observaciones.trim(),
       canto:form.canto, cantidadPlacas:parseInt(form.cantidadPlacas)||0,
       stage:"activo", payment:"sin_pago", modified:false,
@@ -222,7 +266,7 @@ export default function App() {
       hora:new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}),
       timestamps:{activo:ts},
     };
-    saveOrders({orders:orders.orders.concat([o]),nextId:id+1});
+    saveOrders(Object.assign({},orders,{orders:orders.orders.concat([o])}));
     setForm({cliente:"",observaciones:"",canto:false,cantidadPlacas:""});
     setShowForm(false);
     toast_(o.numero+" cargado");
@@ -298,6 +342,11 @@ export default function App() {
     <div style={{fontFamily:"system-ui,sans-serif",padding:"0.875rem",maxWidth:860,margin:"0 auto"}}>
 
       {toast&&<div style={{position:"sticky",top:0,zIndex:20,marginBottom:12,background:toast.type==="err"?"#FEE2E2":"#DCFCE7",color:toast.type==="err"?"#7F1D1D":"#14532D",padding:"0.5rem 1rem",borderRadius:10,fontSize:13,fontWeight:500}}>{toast.msg}</div>}
+
+      {saveError&&<div style={{position:"sticky",top:0,zIndex:21,marginBottom:12,background:"#FEE2E2",color:"#7F1D1D",padding:"0.6rem 1rem",borderRadius:10,fontSize:13,fontWeight:600,display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,border:"1.5px solid #EF4444"}}>
+        <span>⚠ {saveError}</span>
+        <button onClick={function(){setSaveError(null);}} style={{background:"transparent",border:"none",color:"#7F1D1D",fontWeight:700,cursor:"pointer",fontSize:14}}>✕</button>
+      </div>}
 
       {pin&&(
         <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:50,display:"flex",alignItems:"center",justifyContent:"center"}}>

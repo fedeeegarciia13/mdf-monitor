@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-const ORDERS_KEY        = "mdf_orders_v8";
-const HISTORY_KEY       = "mdf_history_v1";
+const PEDIDOS_TABLE     = "pedidos";
 const PIN               = "1234";
 const ARCHIVE_AFTER_MIN = 1440;
 const HOLD_MS           = 800;
@@ -28,36 +27,76 @@ const PAYMENT_OPTS = [
 const SUPABASE_URL = "https://ykygszjqqnkgqjowbanj.supabase.co";
 const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlreWdzempxcW5rZ3Fqb3diYW5qIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MTExMDMsImV4cCI6MjA5NTk4NzEwM30.K24YPH1WeN7eUGpG2OJqfxYCYfNFm5DOxwWiictT_3Y";
 
-async function sbGet(key) {
-  const res = await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos?key=eq."+key+"&select=value,version",{
+class VersionConflictError extends Error {}
+
+async function sbSelect(query) {
+  const res = await fetch(SUPABASE_URL+"/rest/v1/"+PEDIDOS_TABLE+"?"+query,{
     headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY}
   });
-  const data = await res.json();
-  if(data&&data.length>0) return { value:JSON.parse(data[0].value), version:data[0].version };
-  return null;
+  return await res.json();
 }
-class VersionConflictError extends Error {}
-async function sbSet(key,value,expectedVersion) {
-  if (expectedVersion==null) {
-    await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos",{
-      method:"POST",
-      headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json","Prefer":"resolution=merge-duplicates"},
-      body:JSON.stringify({key:key,value:JSON.stringify(value),version:1,updated_at:new Date().toISOString()})
-    });
-    return 1;
-  }
-  const res = await fetch(SUPABASE_URL+"/rest/v1/mdf_pedidos?key=eq."+key+"&version=eq."+expectedVersion,{
+async function sbInsert(fields) {
+  const res = await fetch(SUPABASE_URL+"/rest/v1/"+PEDIDOS_TABLE,{
+    method:"POST",
+    headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json","Prefer":"return=representation"},
+    body:JSON.stringify(fields)
+  });
+  const rows = await res.json();
+  if (!rows || !rows[0]) throw new Error("No se pudo insertar");
+  return rows[0];
+}
+async function sbPatchOne(id,fields,expectedVersion) {
+  const res = await fetch(SUPABASE_URL+"/rest/v1/"+PEDIDOS_TABLE+"?id=eq."+id+"&version=eq."+expectedVersion,{
     method:"PATCH",
     headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json","Prefer":"return=representation"},
-    body:JSON.stringify({value:JSON.stringify(value),version:expectedVersion+1,updated_at:new Date().toISOString()})
+    body:JSON.stringify(Object.assign({},fields,{version:expectedVersion+1,updated_at:new Date().toISOString()}))
   });
   const rows = await res.json();
   if (!rows || rows.length===0) throw new VersionConflictError();
-  return expectedVersion+1;
+  return rows[0];
+}
+async function sbPatchBulk(query,fields) {
+  const res = await fetch(SUPABASE_URL+"/rest/v1/"+PEDIDOS_TABLE+"?"+query,{
+    method:"PATCH",
+    headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Content-Type":"application/json","Prefer":"return=representation"},
+    body:JSON.stringify(fields)
+  });
+  return await res.json();
+}
+async function sbDelete(query) {
+  const res = await fetch(SUPABASE_URL+"/rest/v1/"+PEDIDOS_TABLE+"?"+query,{
+    method:"DELETE",
+    headers:{"apikey":SUPABASE_KEY,"Authorization":"Bearer "+SUPABASE_KEY,"Prefer":"return=representation"}
+  });
+  return await res.json();
 }
 
-const EMPTY_ORDERS  = { orders:[] };
-const EMPTY_HISTORY = { items:[] };
+function tsToIso(ms){ return ms==null?null:new Date(ms).toISOString(); }
+function isoToMs(iso){ return iso==null?null:new Date(iso).getTime(); }
+
+function rowToOrder(row) {
+  return {
+    id:row.id, numero:row.numero||("PED-"+String(row.numero_seq).padStart(4,"0")), cliente:row.cliente, observaciones:row.observaciones,
+    canto:row.canto, cantidadPlacas:row.cantidad_placas, stage:row.stage, payment:row.payment,
+    modified:row.modified, modifiedAt:isoToMs(row.modified_at),
+    fechaIngreso:isoToMs(row.fecha_ingreso), hora:row.hora,
+    timestamps:row.timestamps||{}, archived:row.archived, version:row.version,
+  };
+}
+function orderToRowFields(fields) {
+  var out={};
+  if ("cliente" in fields) out.cliente=fields.cliente;
+  if ("observaciones" in fields) out.observaciones=fields.observaciones;
+  if ("canto" in fields) out.canto=fields.canto;
+  if ("cantidadPlacas" in fields) out.cantidad_placas=fields.cantidadPlacas;
+  if ("modified" in fields) out.modified=fields.modified;
+  if ("modifiedAt" in fields) out.modified_at=tsToIso(fields.modifiedAt);
+  if ("payment" in fields) out.payment=fields.payment;
+  if ("stage" in fields) out.stage=fields.stage;
+  if ("timestamps" in fields) out.timestamps=fields.timestamps;
+  if ("archived" in fields) out.archived=fields.archived;
+  return out;
+}
 
 function getSeq(o)     { return o.canto ? SEQ_CON : SEQ_SIN; }
 function getNext(o)    { var s=getSeq(o),i=s.indexOf(o.stage); return i<s.length-1?s[i+1]:null; }
@@ -155,8 +194,7 @@ function StatRow(p) {
 }
 
 export default function App() {
-  var [orders,  setOrders]  = useState(null);
-  var [history, setHistory] = useState(null);
+  var [pedidos, setPedidos] = useState(null);
   var [mode,    setMode]    = useState("operario");
   var [view,    setView]    = useState("monitor");
   var [toast,   setToast]   = useState(null);
@@ -172,160 +210,188 @@ export default function App() {
   var [tick,    setTick]    = useState(Date.now());
   var [saveError, setSaveError] = useState(null);
   var lastWrite = useRef(0);
-  var ordersVersion = useRef(null);
-  var historyVersion = useRef(null);
 
   function toast_(msg,type){ setToast({msg:msg,type:type||"ok"}); setTimeout(function(){setToast(null);},2800); }
 
   useEffect(function(){ var id=setInterval(function(){setTick(Date.now());},30000); return function(){clearInterval(id);}; },[]);
 
-  var loadOrders = useCallback(async function(){
-    if (Date.now()-lastWrite.current<8000) return;
+  var loadActivos = useCallback(async function(){
+    if (Date.now()-lastWrite.current<5000) return;
     try {
-      var r=await sbGet(ORDERS_KEY);
-      if(r&&r.value&&Array.isArray(r.value.orders)){ setOrders(r.value); ordersVersion.current=r.version; }
-      else setOrders(function(prev){return prev||EMPTY_ORDERS;});
-    } catch(e){ setOrders(function(prev){return prev||EMPTY_ORDERS;}); }
+      var rows=await sbSelect("archived=eq.false");
+      var mapped=rows.map(rowToOrder);
+      setPedidos(function(prev){ return mapped.concat((prev||[]).filter(function(o){return o.archived;})); });
+    } catch(e){ setPedidos(function(prev){return prev||[];}); }
   },[]);
 
-  var loadHistory = useCallback(async function(){
+  var loadArchivados = useCallback(async function(){
+    if (Date.now()-lastWrite.current<5000) return;
     try {
-      var r=await sbGet(HISTORY_KEY);
-      if(r&&r.value&&Array.isArray(r.value.items)){ setHistory(r.value); historyVersion.current=r.version; }
-      else setHistory(function(prev){return prev||EMPTY_HISTORY;});
-    } catch(e){ setHistory(function(prev){return prev||EMPTY_HISTORY;}); }
+      var rows=await sbSelect("archived=eq.true");
+      var mapped=rows.map(rowToOrder);
+      setPedidos(function(prev){ return (prev||[]).filter(function(o){return !o.archived;}).concat(mapped); });
+    } catch(e){ setPedidos(function(prev){return prev||[];}); }
   },[]);
-
-  var saveOrders = useCallback(async function(next){
-    var prev;
-    setOrders(function(cur){ prev=cur; return next; });
-    lastWrite.current=Date.now();
-    try {
-      var newVersion=await sbSet(ORDERS_KEY,next,ordersVersion.current);
-      ordersVersion.current=newVersion;
-      setSaveError(null);
-    } catch(e){
-      lastWrite.current=0;
-      setOrders(prev);
-      if (e instanceof VersionConflictError) {
-        setSaveError("Otro dispositivo guardó un cambio justo antes que vos. Actualicé la vista con lo último — repetí tu acción si hace falta.");
-        loadOrders();
-      } else {
-        setSaveError("No se pudo guardar el último cambio. No se perdió nada — el pedido sigue como estaba antes. Reintentá.");
-      }
-    }
-  },[loadOrders]);
-
-  var saveHistory = useCallback(async function(next){
-    var prev;
-    setHistory(function(cur){ prev=cur; return next; });
-    try {
-      var newVersion=await sbSet(HISTORY_KEY,next,historyVersion.current);
-      historyVersion.current=newVersion;
-      setSaveError(null);
-    } catch(e){
-      setHistory(prev);
-      if (e instanceof VersionConflictError) {
-        setSaveError("Otro dispositivo guardó un cambio en el historial justo antes que vos. Actualicé la vista con lo último.");
-        loadHistory();
-      } else {
-        setSaveError("No se pudo guardar el historial. No se perdió nada. Reintentá.");
-      }
-    }
-  },[loadHistory]);
 
   useEffect(function(){
-    loadOrders(); loadHistory();
-    var id=setInterval(function(){loadOrders();loadHistory();},5000);
+    loadActivos(); loadArchivados();
+    var id=setInterval(function(){loadActivos();loadArchivados();},5000);
     return function(){clearInterval(id);};
-  },[loadOrders,loadHistory]);
+  },[loadActivos,loadArchivados]);
+
+  // Patrón compartido por saveEdit/updatePayment/advance/goBack/archiveNow:
+  // UPDATE de una sola fila, optimista, con rollback o refetch puntual si falla.
+  function mutateOne(id,buildFields){
+    var row=(pedidos||[]).find(function(o){return o.id===id;});
+    if (!row) return;
+    var fields=buildFields(row);
+    if (!fields || Object.keys(fields).length===0) return;
+    var optimisticRow=Object.assign({},row,fields);
+    setPedidos(function(prev){ return (prev||[]).map(function(o){return o.id===id?optimisticRow:o;}); });
+    lastWrite.current=Date.now();
+    sbPatchOne(id,orderToRowFields(fields),row.version).then(function(updated){
+      setPedidos(function(prev){ return (prev||[]).map(function(o){return o.id===id?rowToOrder(updated):o;}); });
+      setSaveError(null);
+    }).catch(function(e){
+      lastWrite.current=0;
+      if (e instanceof VersionConflictError) {
+        setSaveError("Otro dispositivo guardó un cambio en este pedido justo antes que vos. Actualicé la vista con lo último — repetí tu acción si hace falta.");
+        sbSelect("id=eq."+id).then(function(fresh){
+          if (fresh&&fresh[0]) setPedidos(function(prev){ return (prev||[]).map(function(o){return o.id===id?rowToOrder(fresh[0]):o;}); });
+        }).catch(function(){});
+      } else {
+        setPedidos(function(prev){ return (prev||[]).map(function(o){return o.id===id?row:o;}); });
+        setSaveError("No se pudo guardar el último cambio. No se perdió nada — el pedido sigue como estaba antes. Reintentá.");
+      }
+    });
+  }
 
   // Auto-archivar solo en tick (evita race conditions)
   useEffect(function(){
-    if (!orders||!history) return;
+    if (!pedidos) return;
     var cutoff=Date.now()-ARCHIVE_AFTER_MIN*60*1000;
-    var toArchive=orders.orders.filter(function(o){
-      return o.stage==="completado"&&o.timestamps&&o.timestamps.completado&&o.timestamps.completado<cutoff;
+    var toArchive=pedidos.filter(function(o){
+      return !o.archived&&o.stage==="completado"&&o.timestamps&&o.timestamps.completado&&o.timestamps.completado<cutoff;
     });
     if (!toArchive.length) return;
     var ids=toArchive.map(function(o){return o.id;});
-    saveOrders(Object.assign({},orders,{orders:orders.orders.filter(function(o){return ids.indexOf(o.id)===-1;})}));
-    saveHistory({items:toArchive.concat(history.items)});
+    setPedidos(function(prev){
+      return (prev||[]).map(function(o){return ids.indexOf(o.id)!==-1?Object.assign({},o,{archived:true}):o;});
+    });
+    lastWrite.current=Date.now();
+    sbPatchBulk("id=in.("+ids.join(",")+")&archived=eq.false",{archived:true}).catch(function(){
+      lastWrite.current=0; // el proximo poll corrige el estado optimista si esto fallo
+    });
   },[tick]); // eslint-disable-line
 
   function addOrder(){
     if (!form.cliente.trim()){ toast_("Ingresá el nombre del cliente","err"); return; }
-    var ts=Date.now(), id=crypto.randomUUID();
-    var displayNum=orders.orders.length+history.items.length+1;
-    var o={
-      id:id, numero:"PED-"+String(displayNum).padStart(4,"0"),
+    var ts=Date.now();
+    var fields={
+      numero:"", // sin numero fijo: lo derivamos abajo del numero_seq atomico que asigna la DB
       cliente:form.cliente.trim(), observaciones:form.observaciones.trim(),
-      canto:form.canto, cantidadPlacas:parseInt(form.cantidadPlacas)||0,
-      stage:"activo", payment:"sin_pago", modified:false,
-      fechaIngreso:ts,
+      canto:form.canto, cantidad_placas:parseInt(form.cantidadPlacas)||0,
+      stage:"activo", payment:"sin_pago",
+      fecha_ingreso:new Date(ts).toISOString(),
       hora:new Date().toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"}),
       timestamps:{activo:ts},
     };
-    saveOrders(Object.assign({},orders,{orders:orders.orders.concat([o])}));
-    setForm({cliente:"",observaciones:"",canto:false,cantidadPlacas:""});
-    setShowForm(false);
-    toast_(o.numero+" cargado");
+    lastWrite.current=Date.now();
+    sbInsert(fields).then(function(row){
+      var mapped=rowToOrder(row);
+      setPedidos(function(prev){ return (prev||[]).concat([mapped]); });
+      setForm({cliente:"",observaciones:"",canto:false,cantidadPlacas:""});
+      setShowForm(false);
+      setSaveError(null);
+      toast_(mapped.numero+" cargado");
+    }).catch(function(){
+      lastWrite.current=0;
+      setSaveError("No se pudo cargar el pedido. No se guardó nada — reintentá.");
+    });
   }
 
   function saveEdit(id){
     if (!editForm.cliente.trim()){ toast_("El cliente no puede estar vacío","err"); return; }
-    saveOrders(Object.assign({},orders,{orders:orders.orders.map(function(o){
-      if (o.id!==id) return o;
-      return Object.assign({},o,{
+    mutateOne(id,function(){
+      return {
         cliente:editForm.cliente.trim(), observaciones:editForm.observaciones.trim(),
         canto:editForm.canto, cantidadPlacas:parseInt(editForm.cantidadPlacas)||0,
         modified:true, modifiedAt:Date.now(),
-      });
-    })}));
+      };
+    });
     setEditing(null); toast_("Pedido actualizado");
   }
 
-  function updatePayment(id,pay){
-    saveOrders(Object.assign({},orders,{orders:orders.orders.map(function(o){
-      return o.id===id?Object.assign({},o,{payment:pay}):o;
-    })}));
-  }
+  function updatePayment(id,pay){ mutateOne(id,function(){ return {payment:pay}; }); }
 
   function advance(id){
     var ts=Date.now();
-    saveOrders(Object.assign({},orders,{orders:orders.orders.map(function(o){
-      if (o.id!==id) return o;
-      var next=getNext(o); if(!next) return o;
+    mutateOne(id,function(o){
+      var next=getNext(o); if(!next) return {};
       var t=Object.assign({},o.timestamps); t[next]=ts;
-      return Object.assign({},o,{stage:next,timestamps:t});
-    })}));
+      return {stage:next,timestamps:t};
+    });
   }
 
   function goBack(id){
-    saveOrders(Object.assign({},orders,{orders:orders.orders.map(function(o){
-      if (o.id!==id) return o;
-      var prev=getPrev(o); if(!prev) return o;
+    mutateOne(id,function(o){
+      var prev=getPrev(o); if(!prev) return {};
       var t=Object.assign({},o.timestamps); delete t[o.stage];
-      return Object.assign({},o,{stage:prev,timestamps:t});
-    })}));
+      return {stage:prev,timestamps:t};
+    });
   }
 
-  function deleteOrder(id){ saveOrders(Object.assign({},orders,{orders:orders.orders.filter(function(o){return o.id!==id;})})); toast_("Eliminado"); }
+  function deleteOrder(id){
+    var prevPedidos=pedidos;
+    var row=(pedidos||[]).find(function(o){return o.id===id;});
+    if (!row) return;
+    setPedidos(function(prev){ return (prev||[]).filter(function(o){return o.id!==id;}); });
+    lastWrite.current=Date.now();
+    sbDelete("id=eq."+id).then(function(deletedRows){
+      if (!deletedRows||deletedRows.length===0){
+        lastWrite.current=0;
+        setPedidos(prevPedidos);
+        setSaveError("No se pudo eliminar "+row.numero+": los pedidos activos de más de 15 minutos no se pueden borrar (protección contra borrados accidentales). Si hace falta borrarlo, archivalo primero o pedí que lo borren directo en la base.");
+        return;
+      }
+      setSaveError(null);
+      toast_("Eliminado");
+    }).catch(function(){
+      lastWrite.current=0;
+      setPedidos(prevPedidos);
+      setSaveError("No se pudo eliminar el pedido. No se perdió nada. Reintentá.");
+    });
+  }
 
   function archiveNow(id){
-    var order=orders.orders.find(function(o){return o.id===id;}); if(!order) return;
-    saveOrders(Object.assign({},orders,{orders:orders.orders.filter(function(o){return o.id!==id;})}));
-    saveHistory({items:[order].concat(history.items)}); toast_("Movido al historial");
+    mutateOne(id,function(){ return {archived:true}; });
+    toast_("Movido al historial");
   }
 
-  function clearHist(){ if(!window.confirm("¿Borrar todo el historial?")) return; saveHistory(EMPTY_HISTORY); toast_("Historial borrado"); }
+  function clearHist(){
+    if(!window.confirm("¿Borrar todo el historial?")) return;
+    var prevPedidos=pedidos;
+    setPedidos(function(prev){ return (prev||[]).filter(function(o){return !o.archived;}); });
+    lastWrite.current=Date.now();
+    sbDelete("archived=eq.true").then(function(){
+      setSaveError(null);
+      toast_("Historial borrado");
+    }).catch(function(){
+      lastWrite.current=0;
+      setPedidos(prevPedidos);
+      setSaveError("No se pudo borrar el historial. No se perdió nada. Reintentá.");
+    });
+  }
+
   function openPin(){ setPin(true); setPinVal(""); }
   function checkPin(){ if(pinVal===PIN){setMode("gestion");setPin(false);} else{toast_("PIN incorrecto","err");setPinVal("");} }
   function toggleExpand(id){ setExpanded(function(e){return Object.assign({},e,{[id]:!e[id]});}); }
 
-  if (!orders||!history) return <div style={{padding:"3rem",textAlign:"center",color:"#94A3B8"}}>⏳ Cargando...</div>;
+  if (!pedidos) return <div style={{padding:"3rem",textAlign:"center",color:"#94A3B8"}}>⏳ Cargando...</div>;
 
-  var allDone  = orders.orders.filter(function(o){return o.stage==="completado";}).concat(history.items);
+  var activos    = pedidos.filter(function(o){return !o.archived;});
+  var archivados = pedidos.filter(function(o){return o.archived;});
+  var allDone  = pedidos.filter(function(o){return o.stage==="completado";});
   var byScope  = scope==="hoy"?allDone.filter(function(o){return isToday(o.fechaIngreso||o.timestamps&&o.timestamps.activo);}):allDone;
   var byFilter = filter==="canto"?byScope.filter(function(o){return o.canto;}):filter==="sincanto"?byScope.filter(function(o){return !o.canto;}):byScope;
   var wCanto   = byFilter.filter(function(o){return o.canto;}), woCanto=byFilter.filter(function(o){return !o.canto;});
@@ -379,7 +445,7 @@ export default function App() {
 
       {/* Nav */}
       <div style={{display:"flex",background:"#F1F5F9",borderRadius:10,padding:3,marginBottom:"1.25rem"}}>
-        {[["monitor","Monitor"],["resumen","Estadísticas"],["historial","Historial ("+history.items.length+")"]].map(function(item){
+        {[["monitor","Monitor"],["resumen","Estadísticas"],["historial","Historial ("+archivados.length+")"]].map(function(item){
           return <button key={item[0]} onClick={function(){setView(item[0]);}} style={{flex:1,fontSize:12,fontWeight:600,padding:"7px 8px",background:view===item[0]?"#fff":"transparent",color:view===item[0]?"#1E293B":"#64748B",border:"none",borderRadius:8,boxShadow:view===item[0]?"0 1px 4px rgba(0,0,0,0.1)":"none"}}>{item[1]}</button>;
         })}
       </div>
@@ -390,7 +456,7 @@ export default function App() {
           {/* Contadores */}
           <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:"1.25rem"}}>
             {STAGES.map(function(s){
-              var count=orders.orders.filter(function(o){return o.stage===s.key;}).length;
+              var count=activos.filter(function(o){return o.stage===s.key;}).length;
               return <div key={s.key} style={{background:s.bg,border:"1.5px solid "+s.border,borderRadius:12,padding:"0.6rem 0.75rem",textAlign:"center"}}>
                 <div style={{fontSize:26,fontWeight:700,color:s.fg,lineHeight:1}}>{count}</div>
                 <div style={{fontSize:10,fontWeight:600,color:s.fg,marginTop:3,opacity:0.85}}>{s.short}</div>
@@ -404,7 +470,7 @@ export default function App() {
               <div style={{fontSize:11,fontWeight:700,color:"#1D4ED8",textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:8}}>📦 Placas en producción</div>
               <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:6}}>
                 {STAGES.filter(function(s){return s.key!=="completado";}).map(function(s){
-                  var total=orders.orders.filter(function(o){return o.stage===s.key;}).reduce(function(sum,o){return sum+(o.cantidadPlacas||0);},0);
+                  var total=activos.filter(function(o){return o.stage===s.key;}).reduce(function(sum,o){return sum+(o.cantidadPlacas||0);},0);
                   return <div key={s.key} style={{background:"#fff",borderRadius:8,padding:"6px 4px",textAlign:"center",border:"1px solid #DBEAFE"}}>
                     <div style={{fontSize:18,fontWeight:800,color:s.dot,lineHeight:1}}>{total}</div>
                     <div style={{fontSize:9,color:"#64748B",marginTop:2}}>{s.short}</div>
@@ -412,7 +478,7 @@ export default function App() {
                 })}
               </div>
               <div style={{fontSize:11,color:"#1D4ED8",marginTop:8,textAlign:"right",fontWeight:500}}>
-                Total en proceso: {orders.orders.filter(function(o){return o.stage!=="completado";}).reduce(function(sum,o){return sum+(o.cantidadPlacas||0);},0)} placas
+                Total en proceso: {activos.filter(function(o){return o.stage!=="completado";}).reduce(function(sum,o){return sum+(o.cantidadPlacas||0);},0)} placas
               </div>
             </div>
           )}
@@ -458,7 +524,7 @@ export default function App() {
 
           {/* Etapas */}
           {STAGES.map(function(stage){
-            var items=orders.orders.filter(function(o){return o.stage===stage.key;});
+            var items=activos.filter(function(o){return o.stage===stage.key;});
             return (
               <div key={stage.key} style={{marginBottom:"1.5rem"}}>
                 <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
@@ -670,13 +736,13 @@ export default function App() {
         <div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"1rem"}}>
             <div style={{fontSize:15,fontWeight:700}}>🗂 Historial de pedidos</div>
-            {mode==="gestion"&&history.items.length>0&&<button onClick={clearHist} style={{fontSize:12,padding:"5px 12px",color:"#EF4444"}}>🗑 Borrar todo</button>}
+            {mode==="gestion"&&archivados.length>0&&<button onClick={clearHist} style={{fontSize:12,padding:"5px 12px",color:"#EF4444"}}>🗑 Borrar todo</button>}
           </div>
-          {history.items.length===0
+          {archivados.length===0
             ?<div style={{border:"1px dashed #CBD5E1",borderRadius:10,padding:"2.5rem",textAlign:"center",color:"#94A3B8",fontSize:13}}><div style={{fontSize:28,marginBottom:8}}>🗂</div>Los pedidos completados aparecen acá después de 24h.</div>
             :(function(){
-              var todayH=history.items.filter(function(o){return isToday(o.fechaIngreso||o.timestamps&&o.timestamps.activo);});
-              var oldH=history.items.filter(function(o){return !isToday(o.fechaIngreso||o.timestamps&&o.timestamps.activo);});
+              var todayH=archivados.filter(function(o){return isToday(o.fechaIngreso||o.timestamps&&o.timestamps.activo);});
+              var oldH=archivados.filter(function(o){return !isToday(o.fechaIngreso||o.timestamps&&o.timestamps.activo);});
               return <div>
                 {todayH.length>0&&<div style={{marginBottom:"1.5rem"}}>
                   <div style={{fontSize:12,fontWeight:700,color:"#64748B",textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:8}}>Hoy ({todayH.length})</div>

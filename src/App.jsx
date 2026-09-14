@@ -227,7 +227,7 @@ export default function App() {
   var loadArchivados = useCallback(async function(){
     if (Date.now()-lastWrite.current<5000) return;
     try {
-      var rows=await sbSelect("archived=eq.true&order=fecha_ingreso.asc");
+      var rows=await sbSelect("archived=eq.true&order=fecha_ingreso.desc");
       var mapped=rows.map(rowToOrder);
       setPedidos(function(prev){ return (prev||[]).filter(function(o){return !o.archived;}).concat(mapped); });
     } catch(e){ setPedidos(function(prev){return prev||[];}); }

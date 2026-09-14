@@ -218,7 +218,7 @@ export default function App() {
   var loadActivos = useCallback(async function(){
     if (Date.now()-lastWrite.current<5000) return;
     try {
-      var rows=await sbSelect("archived=eq.false");
+      var rows=await sbSelect("archived=eq.false&order=created_at.asc");
       var mapped=rows.map(rowToOrder);
       setPedidos(function(prev){ return mapped.concat((prev||[]).filter(function(o){return o.archived;})); });
     } catch(e){ setPedidos(function(prev){return prev||[];}); }
@@ -227,7 +227,7 @@ export default function App() {
   var loadArchivados = useCallback(async function(){
     if (Date.now()-lastWrite.current<5000) return;
     try {
-      var rows=await sbSelect("archived=eq.true");
+      var rows=await sbSelect("archived=eq.true&order=created_at.asc");
       var mapped=rows.map(rowToOrder);
       setPedidos(function(prev){ return (prev||[]).filter(function(o){return !o.archived;}).concat(mapped); });
     } catch(e){ setPedidos(function(prev){return prev||[];}); }
